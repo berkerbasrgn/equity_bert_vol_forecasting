@@ -1,5 +1,4 @@
 
-
 # Adapted from the original Vola-BERT dataset (Dataset_Rates_30M) for S&P 500
 # E-mini futures hourly volatility forecasting.
 #
@@ -15,7 +14,9 @@
 #     - Title-case OHLCV columns (Open, High, Low, Close, Volume)
 #     - One row per timestamp (most-liquid contract already selected)
 #     - Spread instruments and bad bars already removed
-#
+
+
+
 # Key differences from the original Vola-BERT dataset (Dataset_Rates_30M):
 #   - Source     : Databento GLBX.MDP3 pre-aggregated 1h OHLCV Parquet
 #                  (vs pre-built 30-minute FX CSV from FirstRate Data)
@@ -34,7 +35,6 @@
 #                  log-range volatility estimator (same definition as Vola-BERT)
 #   - Volume     : log_volume derived from the bar's trade count / volume field
 
-import os
 import pandas as pd
 import numpy as np
 import torch
@@ -42,9 +42,9 @@ from torch.utils.data import Dataset
 from src.utils import StandardScaler
 
 
-    # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Token vocabularies
-    # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Semantic tokens encode the qualitative market regime at the first step of
 # each prediction window.  They are passed to EquityBERT's embedding layers
 # and concatenated to the numerical input representation, following the same
@@ -61,7 +61,6 @@ from src.utils import StandardScaler
 #
 # event_impact — severity tier of the macro event:
 #   0 = NONE, 1 = MEDIUM, 2 = HIGH
-
 TOKEN_MAPPINGS = {
     "market_session": {
         "overnight":   0,
@@ -85,7 +84,6 @@ TOKEN_MAPPINGS = {
 
 # Vocabulary sizes — pass this dict to EquityBERT's SemanticTokenEmbedding
 # so it can build correctly-sized nn.Embedding tables for each token type.
-
 SEMANTIC_TOKEN_VOCAB = {
     "market_session": 4,
     "event_type":     5,
@@ -94,41 +92,38 @@ SEMANTIC_TOKEN_VOCAB = {
 
 
 # ---------------------------------------------------------------------------
-# Helper: US equity session classifier
-
+# Helper: US equity session classifier (reference implementation)
+# ---------------------------------------------------------------------------
 # NOT USED IN THIS VERSION — session labels are computed via vectorised
 # numpy.select in __read_data__ (10-50× faster than row-wise .apply()).
-# Retained here for reference and unit-testing individual timestamps.
-# ---------------------------------------------------------------------------
+# Retained for reference and unit-testing individual timestamps.
 def session_label(dt):
     """
     Classifies a US/Eastern timestamp into one of four equity market sessions.
 
     Arguments:
-        dt: a timezone-aware pandas Timestamp in America/New_York
+        dt (pd.Timestamp): timezone-aware timestamp in America/New_York
 
     Returns:
         str: one of 'overnight', 'pre_market', 'regular', 'after_hours'
 
     Session boundaries (ET):
-        pre_market  : 04:00 -- 09:29
-        regular     : 09:30 -- 15:59  (NYSE core session)
-        after_hours : 16:00 -- 19:59
-        overnight   : 20:00 -- 03:59  and all Sunday bars
+        pre_market  : 04:00 – 09:29  (pre-open institutional flow)
+        regular     : 09:30 – 15:59  (NYSE core session)
+        after_hours : 16:00 – 19:59  (post-close prints, earnings releases)
+        overnight   : 20:00 – 03:59  and all Sunday bars (thin futures continuation)
 
-    Improvement over original:
-        The original Vola-BERT used geographic FX sessions (Tokyo/London/NY
-        overlaps). These have no meaning for US equity futures. This function
-        replaces them with session boundaries that reflect actual US equity
-        market microstructure — liquidity, institutional flow, and earnings
-        announcement timing all vary materially across these four regimes.
+    Difference from Vola-BERT:
+        Vola-BERT used geographic FX sessions (Tokyo / London / NY overlaps),
+        which have no meaning for US equity index volatility.  This function
+        replaces them with boundaries that reflect actual US equity market
+        microstructure — liquidity levels, institutional flow patterns, and
+        earnings announcement timing all vary materially across these four regimes.
     """
-    # Sunday bars belong to the overnight futures session regardless of hour
     if dt.dayofweek == 6:
         return "overnight"
 
-    h, m = dt.hour, dt.minute
-    mins = h * 60 + m
+    mins = dt.hour * 60 + dt.minute
 
     if 4 * 60 <= mins < 9 * 60 + 30:
         return "pre_market"
@@ -141,26 +136,30 @@ def session_label(dt):
 
 
 # ---------------------------------------------------------------------------
-# Helper: RSI (unchanged from original)
+# Helper: RSI (unchanged from Vola-BERT)
 # ---------------------------------------------------------------------------
 def calculate_rsi(prices, period=14):
     """
-    Calculates RSI for a given price series.
+    Calculates the Relative Strength Index (RSI) for a given price series.
+
+    Uses Wilder's exponential smoothing (alpha = 1/period) to match the
+    conventional RSI definition — identical to the implementation in Vola-BERT.
 
     Arguments:
         prices (pd.Series): closing prices or log returns
-        period (int): lookback period (default 14)
+        period (int)      : lookback window (default: 14)
 
     Returns:
-        pd.Series: RSI values
+        pd.Series: RSI values in the range [0, 100]; NaN for the first
+                   `period` rows due to the EMA warm-up period
     """
-    delta = prices.diff().dropna()
-    up   = delta.clip(lower=0)
-    down = delta.clip(upper=0, lower=None)
+    delta    = prices.diff().dropna()
+    up       = delta.clip(lower=0)
+    down     = delta.clip(upper=0, lower=None)
     ema_up   = up.ewm(alpha=1 / period, min_periods=period).mean()
     ema_down = down.abs().ewm(alpha=1 / period, min_periods=period).mean()
-    rs  = ema_up / ema_down
-    rsi = 100 - 100 / (1 + rs)
+    rs       = ema_up / ema_down
+    rsi      = 100 - 100 / (1 + rs)
     return rsi
 
 
@@ -170,62 +169,49 @@ def calculate_rsi(prices, period=14):
 class Dataset_SP500_1H(Dataset):
     """
     PyTorch Dataset for S&P 500 hourly volatility forecasting.
- 
+
     Adapted from Vola-BERT's Dataset_Rates_30M to support US equity index data
     at hourly frequency.  The public interface (constructor arguments, __getitem__
     return shape, inverse_transform) is kept compatible with Vola-BERT so that
     EquityBERT training scripts require minimal changes.
- 
+
     Key adaptations from Dataset_Rates_30M:
-        - Source data is a Databento GLBX.MDP3 Parquet with pre-aggregated 1h
-          OHLCV bars for ES.FUT; no resampling needed inside __read_data__
-          (Vola-BERT received a pre-built 30-minute FX CSV from FirstRate Data)
+        - Source data is a pre-processed Databento Parquet with title-case OHLCV
+          columns (output of preprocess_data.py); no resampling or column
+          renaming needed inside __read_data__
         - US equity session tokens replace Vola-BERT's geographic FX sessions
         - US macro event calendar replaces FXStreet per-currency event flags
         - Technical indicator windows scaled to T=20h for hourly data
-          (Vola-BERT used T=12 × 30min = 6h)
         - Minimum week-row filter is 60 (vs 230 for 30-minute FX data)
         - Lagged volatility features use row-shifts of 1h, 2h, 4h, 8h, 24h
- 
- 
+
     Each __getitem__ sample (use_explainable=True):
         ((x, tokens), y)
         x      : (num_series, seq_len)  float32 — scaled numerical features
         tokens : dict of scalar int64 tensors:
                  'market_session', 'event_type', 'event_impact'
         y      : (1, pred_len)          float32 — future log high-low range
- 
+
     Each __getitem__ sample (use_explainable=False):
         (x, y)
         x      : (num_series, seq_len)  float32
         y      : (1, pred_len)          float32
- 
-    Technical indicator columns (TECH_INDICATORS):
-        middle_band, upper_band, lower_band  — Bollinger Bands on log_return
-        momentum, acceleration               — rate of change and its derivative
-        ema                                  — exponential moving average of log_return
-        rsi                                  — Wilder RSI on log_return
- 
-    Lagged volatility columns (INTERDAY_VOLAS):
-        prev_r-{1,2,4,8,24}h  — row-shifts of the target r_t
     """
 
-    # Technical indicator column names (computed per week)
     TECH_INDICATORS = [
         "middle_band", "upper_band", "lower_band",
         "momentum", "acceleration",
         "ema", "rsi",
     ]
 
-    # Lagged log-range column names
     # Lags chosen to capture short-term clustering (1h, 2h),
-    # medium-term persistence (4h, 8h), and intraday cyclicality (24h)
+    # medium-term persistence (4h, 8h), and intraday cyclicality (24h).
     INTERDAY_VOLAS = [f"prev_r-{lag}h" for lag in [1, 2, 4, 8, 24]]
 
     def __init__(
         self,
         data_path,
-        events_df,
+        events_df=None,
         flag="train",
         size=None,
         scale=True,
@@ -237,7 +223,6 @@ class Dataset_SP500_1H(Dataset):
         mode="24h",
         use_event_type=False,
         use_event_impact=False,
-        
     ):
         """
         Arguments:
@@ -272,10 +257,10 @@ class Dataset_SP500_1H(Dataset):
             use_event_impact (bool)  : if False, event_impact token forced to 0;
                                        only affects use_explainable=True mode
         """
-
         if size is None:
             self.seq_len  = 48   # 48h lookback (~2 trading days of 24h futures)
-            self.pred_len = 12   # 12h forecast horizon
+
+            self.pred_len = 12    # 12h forecast horizon
         else:
             self.seq_len, self.pred_len = size
 
@@ -283,21 +268,30 @@ class Dataset_SP500_1H(Dataset):
             f"flag must be 'train', 'val', or 'test'; got '{flag}'"
         self.set_type = {"train": 0, "val": 1, "test": 2}[flag]
 
-        self.data_path       = data_path
-        self.events_df       = events_df
-        self.scale           = scale
-        self.use_technical   = use_technical
-        self.use_events      = use_events
+        # Fail fast if events are requested but no calendar is provided
+        if use_events and events_df is None:
+            raise ValueError(
+                "use_events=True but events_df is None. "
+                "Pass a macro-event DataFrame or set use_events=False."
+            )
+
+        self.data_path        = data_path
+        self.events_df        = events_df
+        self.scale            = scale
+        self.use_technical    = use_technical
+        self.use_events       = use_events
         self.use_event_type   = use_event_type
         self.use_event_impact = use_event_impact
-        self.use_interday    = use_interday
-        self.use_explainable = use_explainable
-        self.fine_tuning_pct = fine_tuning_pct
-        self.mode            = mode
+        self.use_interday     = use_interday
+        self.use_explainable  = use_explainable
+        self.fine_tuning_pct  = fine_tuning_pct
+        self.mode             = mode
 
         if flag != "train" and fine_tuning_pct is not None:
-            print("Warning: fine_tuning_pct is only applied to the training split and"
-            "has no effect on the validation or test splits.")
+            print(
+                "Warning: fine_tuning_pct is only applied to the training split "
+                "and has no effect on val/test."
+            )
 
         self.__read_data__()
 
@@ -306,7 +300,7 @@ class Dataset_SP500_1H(Dataset):
         """
         Loads and preprocesses the processed ES.FUT Parquet into per-week
         feature tensors ready for model consumption.
- 
+
         Processing pipeline:
             1. Load processed Parquet (title-case columns, one row/timestamp)
             2. Ensure Datetime is timezone-aware and sort chronologically
@@ -321,7 +315,7 @@ class Dataset_SP500_1H(Dataset):
            10. Chronological 70/15/15 train-val-test split by week count
            11. Fit StandardScaler on training weeks; transform all splits
            12. Store per-week arrays in self.data and self.raw_data
- 
+
         Key differences from Dataset_Rates_30M.__read_data__:
             - Input is a pre-processed Parquet (not raw CSV)
             - MIN_WEEK_ROWS = 60 (vs 230 for 30-minute FX data)
@@ -330,37 +324,35 @@ class Dataset_SP500_1H(Dataset):
             - Session labels via numpy.select (10-50× faster than .apply())
             - Lagged features: row-shifts of 1h, 2h, 4h, 8h, 24h
         """
-
-
         self.scaler = StandardScaler()
 
-        # ---- Load and parse -----------------------------------------------
+        # ---- Load and parse ----------------------------------------
         # preprocess_data.py has already: reset index, renamed columns to
         # title-case, selected most-liquid contract, filtered bad bars.
         df_raw = pd.read_parquet(self.data_path)
-        df_raw["Datetime"] = pd.to_datetime(df_raw["Datetime"], utc=True).dt.tz_convert("America/New_York")
+        df_raw["Datetime"] = pd.to_datetime(df_raw["Datetime"], utc=True)
+        if df_raw["Datetime"].dt.tz is None:
+            df_raw["Datetime"] = df_raw["Datetime"].dt.tz_localize("America/New_York")
+        else:
+            df_raw["Datetime"] = df_raw["Datetime"].dt.tz_convert("America/New_York")
 
         df_raw = df_raw.sort_values("Datetime").reset_index(drop=True)
-
-        df_raw = df_raw[df_raw["Datetime"] >= pd.Timestamp("2019-01-01", tz="America/New_York")].copy()
         df_raw = df_raw.dropna(subset=["Open", "High", "Low", "Close"])
 
-        # ---- Optional: restrict to regular trading hours ------
-
+        # ---- 2. Optional: restrict to regular trading hours ------------------
         if self.mode == "trading":
             df_raw = df_raw[
                 (df_raw["Datetime"].dt.hour >= 9) &
-
-                (df_raw["Datetime"].dt.hour < 16)            
+                (df_raw["Datetime"].dt.hour < 16)
             ]
-        # ---- Event lookup (forward + backward merge_asof) -----------------
+
+        # ---- 3. Event lookup (forward + backward merge_asof) -----------------
         # Forward merge: next upcoming event → hours_to_event
-        # Backward merge: most recent past event → hours_since_event 
+        # Backward merge: most recent past event → hours_since_event
+        #
         # The original code used only a forward merge for hours_since_event,
         # which produced all-zero values (bar_time − future_event ≤ 0, clipped
         # to 0).  The backward merge fixes this.
-
-
         if self.use_events:
             events_sorted = (
                 self.events_df
@@ -377,6 +369,7 @@ class Dataset_SP500_1H(Dataset):
                 right_on="next_event_dt",
                 direction="forward",
             )
+
             merged_bwd = pd.merge_asof(
                 df_raw[["Datetime"]],
                 events_sorted.rename(columns={"datetime": "prev_event_dt"}),
@@ -385,38 +378,28 @@ class Dataset_SP500_1H(Dataset):
                 direction="backward",
             )
 
-
             df_raw["hours_to_event"] = (
                 (merged_fwd["next_event_dt"] - df_raw["Datetime"])
-                .dt.total_seconds()
-                .div(3600.0)
-                .clip(upper=999.0)
-                .fillna(999.0)
+                .dt.total_seconds().div(3600.0)
+                .clip(upper=999.0).fillna(999.0)
             )
             df_raw["hours_since_event"] = (
                 (df_raw["Datetime"] - merged_bwd["prev_event_dt"])
-                .dt.total_seconds()
-                .div(3600.0)
-                .clip(lower=-0.0, upper=48.0)
-                .fillna(999.0)
+                .dt.total_seconds().div(3600.0)
+                .clip(lower=0, upper=48).fillna(999.0)
             )
-
             df_raw["is_event_recent"] = (df_raw["hours_since_event"] <= 5).astype(int)
-            df_raw["is_event"] = (merged_fwd["next_event_dt"].notna()).astype(int)
+            df_raw["is_event"]        = merged_fwd["next_event_dt"].notna().astype(int)
+            df_raw["is_event_window"] = (df_raw["hours_to_event"].abs() <= 3).astype(int)
+            df_raw["time_to_event"]   = (
+                (merged_fwd["next_event_dt"] - df_raw["Datetime"])
+                .dt.total_seconds().div(3600.0)
+                .clip(-12, 12).fillna(999.0)
+            )
             df_raw["event_type_raw"]   = merged_fwd["event_type"].fillna("NONE").str.upper()
             df_raw["event_impact_raw"] = merged_fwd["impact"].fillna("NONE").str.upper()
 
-            df_raw["is_event_window"] = ((df_raw["hours_to_event"].abs() <= 3)).astype(int)
-            df_raw["time_to_event"] = (
-                (merged_fwd["next_event_dt"] - df_raw["Datetime"])
-                .dt.total_seconds()
-                .div(3600.0)
-                .clip(-12, 12)
-                .fillna(999.0)
-            )
-        # ---- Vectorised session label (replaces per-row .apply()) --------
-        # SPEEDUP: numpy select on integer arrays is 10-50x faster than
-        # calling a Python function row by row via .apply().
+        # ---- 4. Session labels (vectorised) ----------------------------------
         if self.use_explainable:
             dow  = df_raw["Datetime"].dt.dayofweek
             mins = df_raw["Datetime"].dt.hour * 60 + df_raw["Datetime"].dt.minute
@@ -434,12 +417,11 @@ class Dataset_SP500_1H(Dataset):
             ]
             df_raw["market_session"] = np.select(conditions, choices, default="overnight")
 
-        # ---- Group by ISO week -------------------------------------------
+        # ---- 5. ISO-week grouping --------------------------------------------
         df_raw["iso_year"] = df_raw["Datetime"].dt.isocalendar().year.astype(int)
         df_raw["iso_week"] = df_raw["Datetime"].dt.isocalendar().week.astype(int)
         df_raw["week_key"] = (
-            df_raw["iso_year"].astype(str)
-            + "-W"
+            df_raw["iso_year"].astype(str) + "-W"
             + df_raw["iso_week"].astype(str).str.zfill(2)
         )
 
@@ -449,74 +431,61 @@ class Dataset_SP500_1H(Dataset):
         raw_df_data = []
 
         for week_key, week_data in df_raw.groupby("week_key"):
-
             if len(week_data) < MIN_WEEK_ROWS:
                 continue
 
             week_data = week_data.copy().reset_index(drop=True)
-            # target variable: log-range (Parkinson) volatility estimator, log high-low range
+
+            # Target: log high-low range (Parkinson volatility estimator)
             week_data["r"] = np.log(week_data["High"] / week_data["Low"])
-            # log return and log volume features (log return is the basis for most technical indicators)
+
+            # Log return and log volume
             week_data["log_return"] = np.log(
                 week_data["Close"] / week_data["Close"].shift(1)
             )
-
             week_data["log_volume"] = np.log1p(week_data["Volume"])
 
+            # Technical indicators (window T=20h for hourly data)
             T = 20
             D = 2
-
             week_data["middle_band"] = week_data["log_return"].rolling(window=T).mean()
-            rolling_std = week_data["log_return"].rolling(window=T).std()
+            rolling_std              = week_data["log_return"].rolling(window=T).std()
             week_data["upper_band"]  = week_data["middle_band"] + D * rolling_std
             week_data["lower_band"]  = week_data["middle_band"] - D * rolling_std
 
-            week_data["momentum"]     = (
-                week_data["log_return"] - week_data["log_return"].shift(T)
-            )
-            week_data["acceleration"] = (
-                week_data["momentum"] - week_data["momentum"].shift(T)
-            )
+            week_data["momentum"]     = week_data["log_return"] - week_data["log_return"].shift(T)
+            week_data["acceleration"] = week_data["momentum"] - week_data["momentum"].shift(T)
 
             week_data["ema"] = week_data["log_return"].ewm(span=T, adjust=False).mean()
             week_data["rsi"] = calculate_rsi(week_data["log_return"], period=14)
-            # lagged log-range features to capture volatility clustering and intraday cyclicality; lags of 1h, 2h, 4h, 8h, 24h
+
+            # Lagged log-range features
             for lag in [1, 2, 4, 8, 24]:
                 week_data[f"prev_r-{lag}h"] = week_data["r"].shift(lag)
 
-            # ---- Drop NaN rows (rolling indicator warmup) ----------------
+            # Drop NaN warm-up rows
             week_data = week_data.dropna().reset_index(drop=True)
-
             if len(week_data) < (self.seq_len + self.pred_len):
                 continue
 
-            # ---- Build feature matrix ------------------------------------
-            # Target 'r' is always placed last so that slicing [:,:-1] gives
-            # features and [:,-1:] gives the target with no ambiguity.
+            # Assemble feature matrix (target 'r' always last)
             used_features = []
-
             if self.use_technical:
                 used_features += self.TECH_INDICATORS + ["log_return"]
-
             if self.use_events:
-                used_features += ["hours_to_event",
-                                   "hours_since_event",
-                                     "is_event_recent",
-                                     "is_event",
-                                     "is_event_window",
-                                     "time_to_event"]
-
+                used_features += [
+                    "hours_to_event", "hours_since_event", "is_event_recent",
+                    "is_event", "is_event_window", "time_to_event",
+                ]
             if self.use_interday:
                 used_features += self.INTERDAY_VOLAS
-
             used_features += ["log_volume"]
-
-            used_features.append("r")
+            used_features += ["r"]
 
             raw_df_data.append(week_data)
             df_data.append(week_data[used_features])
 
-        # ---- Temporal train / val / test split ---------------------------
+        # ---- 6. Temporal train / val / test split ----------------------------
         # 70 / 15 / 15 by week count, strictly chronological.
         train_start = 0
         if self.fine_tuning_pct is not None and self.fine_tuning_pct < 1.0:
@@ -528,31 +497,31 @@ class Dataset_SP500_1H(Dataset):
         test_start = int(0.85 * len(df_data))
         borders    = [train_start, val_start, test_start, len(df_data)]
 
-        # ---- Fit scaler on training weeks only ----------------------------
-        # Scaler statistics computed from training weeks only.
-        # Training stats applied to val/test — never the reverse.
+        # ---- 7. Fit scaler on training weeks only ----------------------------
         if self.scale:
             train_frames = [df_data[i] for i in range(train_start, val_start)]
             if len(train_frames) == 0:
-                raise ValueError("No training data available for scaling. Check fine_tuning_pct.")
+                raise ValueError(
+                    "No training data available for scaling. "
+                    "Check fine_tuning_pct or the date range of data_path."
+                )
             train_concat = pd.concat(train_frames).values
             self.scaler.fit(train_concat)
 
-        # ---- Store split-specific weeks ----------------------------------
+        # ---- 8. Store split-specific weeks -----------------------------------
         lo, hi = borders[self.set_type], borders[self.set_type + 1]
 
         self.data     = []
-        self.raw_data = []
+        self.raw_data = []  # always populated so start_date/end_date work
 
         for i in range(lo, hi):
             week_values = df_data[i].values
             if self.scale:
                 week_values = self.scaler.transform(week_values)
             self.data.append(week_values)
-            if self.use_explainable:
-                self.raw_data.append(raw_df_data[i])
+            self.raw_data.append(raw_df_data[i])
 
-        # ---- Index helpers -----------------------------------------------
+        # ---- 9. Index helpers ------------------------------------------------
         self.week_lens = [len(w) for w in self.data]
         self.data_len  = [
             max(0, wl - self.seq_len - self.pred_len + 1)
@@ -561,8 +530,6 @@ class Dataset_SP500_1H(Dataset):
         self.cumsum  = np.cumsum(self.data_len)
         self.tot_len = sum(self.data_len)
 
-        # num_series = feature count excluding target 'r'
-        # Pass this value to EquityBERT as num_series at construction time.
         self.num_series = df_data[0].shape[1] - 1 if df_data else 0
 
     # ------------------------------------------------------------------
@@ -585,13 +552,13 @@ class Dataset_SP500_1H(Dataset):
     def __getitem__(self, index):
         """
         Returns one sample.
- 
+
         When use_explainable=True  → ((x, tokens), y)
         When use_explainable=False → (x, y)
- 
+
         x : (num_series, seq_len) float32
         y : (1, pred_len)         float32
- 
+
         Token lookup uses the first row of the prediction window (r_begin) —
         the regime the model is forecasting INTO.
         """
@@ -603,34 +570,35 @@ class Dataset_SP500_1H(Dataset):
         r_begin = s_end
         r_end   = r_begin + self.pred_len
 
-        seq_x = self.data[week_idx][s_begin:s_end, :-1]   # (seq_len, num_series)
-        seq_y = self.data[week_idx][r_begin:r_end, -1:]   # (pred_len, 1)
+        seq_x = self.data[week_idx][s_begin:s_end, :-1]
+        seq_y = self.data[week_idx][r_begin:r_end, -1:]
 
-        x = torch.tensor(seq_x, dtype=torch.float).transpose(1, 0)  # (num_series, seq_len)
-        y = torch.tensor(seq_y, dtype=torch.float).transpose(1, 0)  # (1, pred_len)
+        x = torch.tensor(seq_x, dtype=torch.float).transpose(1, 0)
+        y = torch.tensor(seq_y, dtype=torch.float).transpose(1, 0)
 
         if self.use_explainable:
             next_row = self.raw_data[week_idx].iloc[r_begin]
 
             session_str = next_row.get("market_session", "overnight")
             session_tok = torch.tensor(
-                TOKEN_MAPPINGS["market_session"].get(session_str, 0), dtype=torch.long
+                TOKEN_MAPPINGS["market_session"].get(session_str, 0),
+                dtype=torch.long,
             )
 
-            event_type_str = next_row.get("event_type_raw", "NONE")
-            event_type_str = str(event_type_str).upper()
+            event_type_str = str(next_row.get("event_type_raw", "NONE")).upper()
             if event_type_str not in TOKEN_MAPPINGS["event_type"]:
                 event_type_str = "NONE"
             event_type_tok = torch.tensor(
-                TOKEN_MAPPINGS["event_type"][event_type_str] if self.use_event_type else 0, dtype=torch.long
+                TOKEN_MAPPINGS["event_type"][event_type_str] if self.use_event_type else 0,
+                dtype=torch.long,
             )
 
-            event_impact_str = next_row.get("event_impact_raw", "NONE")
-            event_impact_str = str(event_impact_str).upper()
+            event_impact_str = str(next_row.get("event_impact_raw", "NONE")).upper()
             if event_impact_str not in TOKEN_MAPPINGS["event_impact"]:
                 event_impact_str = "NONE"
             event_impact_tok = torch.tensor(
-                TOKEN_MAPPINGS["event_impact"][event_impact_str] if self.use_event_impact else 0, dtype=torch.long
+                TOKEN_MAPPINGS["event_impact"][event_impact_str] if self.use_event_impact else 0,
+                dtype=torch.long,
             )
 
             tokens = {
@@ -644,20 +612,20 @@ class Dataset_SP500_1H(Dataset):
 
     # ------------------------------------------------------------------
     def inverse_transform(self, data):
-        """Re-scales model predictions back to the original log-range scale."""
+        """Re-scales predictions back to the original log-range scale."""
         return self.scaler.inverse_transform(data)
-    
+
+    # ------------------------------------------------------------------
     @property
     def start_date(self):
-        """Returns the earliest datetime in the dataset split (train/val/test)."""
+        """Earliest datetime in this split."""
         if self.raw_data:
             return self.raw_data[0]["Datetime"].iloc[0]
         return None
-    
+
     @property
     def end_date(self):
-        """Returns the latest datetime in the dataset split (train/val/test)."""
+        """Latest datetime in this split."""
         if self.raw_data:
             return self.raw_data[-1]["Datetime"].iloc[-1]
         return None
-    
