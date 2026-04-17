@@ -1,0 +1,24 @@
+# Core
+python>=3.10
+
+# Data processing
+pandas>=2.0
+numpy>=1.24
+
+# Deep learning
+torch>=2.0
+
+# Data loading / parquet
+pyarrow>=14.0
+
+# Visualization
+matplotlib>=3.7
+
+# Training utilities
+scikit-learn>=1.3
+
+# Optional (ama önerilir)
+tqdm>=4.66
+
+# Time handling
+pytz>=2023.3
