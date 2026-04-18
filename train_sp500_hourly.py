@@ -421,7 +421,7 @@ def main():
             "use_event_impact": False,
         },
         {
-            "name": "Improved Timing Events",
+            "name": "Event Timing Only",
             "use_events": True,
             "use_event_type": False,
             "use_event_impact": False,
