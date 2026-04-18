@@ -1,15 +1,19 @@
+
 """
 Training script for EquityBERT on S&P 500 HOURLY DATA
 Following ICAIF 2025 Paper: "Repurposing Language Models for FX Volatility Forecasting"
-
-This script implements:
-1. Multiple forecast horizons: (40→5), (50→10), (60→20)
-2. Naive baseline comparison (last-value persistence)
-3. Data-scarce scenario (10% of training data)
-4. rMAE and rMSE metrics (relative to naive baseline)
+This script:
+ 1. Loads the pre-processed ES.FUT hourly Parquet via Dataset_SP500_1H
+ 2. Evaluates a naive (last-value persistence) baseline on the test set
+ 3. Trains EquityBERT with semantic tokens (market session, event type/impact)
+ 4. Computes rMAE and rMSE relative to the naive baseline
+ 5. Saves loss curves, checkpoints, and a results summary
 
 The goal is to prove EquityBERT's effectiveness on S&P 500 data,
 not just FX data as in the original paper.
+The script creates a versioned run directory under runs/ (e.g. runs/v1/)
+containing checkpoints, loss plots, and results files.
+
 """
 
 import os
@@ -19,7 +23,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 import sys
 import matplotlib.pyplot as plt
-from datetime import datetime
 
 # Add paths for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,50 +30,67 @@ sys.path.insert(0, current_dir)
 sys.path.insert(0, os.path.join(current_dir, "src"))
 
 # Import model components
-from src.mydataset import Dataset_SP500_1H 
+from src.mydataset import Dataset_SP500_1H, SEMANTIC_TOKEN_VOCAB
 from src.model_bert import EquityBERT
-from src.model_lstm import LSTMModel
 from src.trainer import Trainer
 
-# ================== NAIVE BASELINE (Critical for Paper Comparison) ==================
+#  NAIVE BASELINE (Critical for Paper Comparison) 
 
 class NaiveBaseline:
     """
-    Naive baseline: persistence model that predicts the last observed volatility
-    
-    This is the baseline used in the paper (Table 2 and Table 3).
-    rMAE and rMSE are calculated by dividing model errors by naive baseline errors.
-    
-    The naive baseline serves as a sanity check:
-    - If rMAE < 1.0: Model is better than naive
-    - If rMAE > 1.0: Model is worse than naive (problem!)
+    Last-value persistence baseline: predicts the most recent observed
+    volatility for all future steps.
+ 
+    This is the denominator in the rMAE / rMSE metrics used in the paper.
+    rMAE < 1.0 means the model beats naive; rMAE > 1.0 means it's worse.
     """
-    
     def __init__(self):
-        self.name = "Naive (Last Value)"
-    
+        self.name = "Naive Baseline"
+
     def evaluate(self, dataset):
-        """Evaluate naive baseline on the given dataset."""
+        """Evaluate on a dataset that returns ((x, tokens), y) or (x, y).
+ 
+        Uses the last value of the TARGET feature (last column before target
+        split = the last value of r in the input window) as the naive forecast.
+        Because the dataset places the target 'r' last and __getitem__ slices
+        seq_x = data[:, :-1], the target's lagged values are NOT in seq_x.
+        Instead, I use the last value of the first feature as a proxy for
+        the most recent scaled observation , matching the original Vola-BERT
+        naive baseline implementation.
+ 
+        Returns:
+            dict with 'MAE' and 'MSE' keys
+        """
     
         predictions = []
         targets = []
     
         print(f"\nEvaluating {self.name} on {len(dataset)} samples...")
     
-        for i in range(len(dataset)):
-            # (seq_x, tokens), seq_y = dataset[i]
-            seq_x, seq_y = dataset[i]  # Assuming dataset returns (seq_x, tokens), seq_y but we only need seq_x and seq_y for naive baseline
+
+        # for i in range(len(dataset)):
+        #     # (seq_x, tokens), seq_y = dataset[i]
+        #     seq_x, seq_y = dataset[i]  # Assuming dataset returns (seq_x, tokens), seq_y but we only need seq_x and seq_y for naive baseline
         
         # Last volatility (scaled) - first feature, last timestep
-            last_vola = seq_x[0, -1].item()  # Assuming first feature is volatility and it's scaled
+            # last_vola = seq_x[0, -1].item()  # Assuming first feature is volatility and it's scaled
         
         # Repeat for forecast horizon
-            horizon = seq_y.shape[1]
+        for i in range(len(dataset)):
+            sample = dataset[i]
+            #handle both ((seq_x, tokens), seq_y) and (seq_x, seq_y)
+            if isinstance(sample[0], tuple):
+                (x, y) = sample[0][0], sample[1]
+            else:
+                x, y = sample[0], sample[1]
+
+            horizon = y.shape[1]
+            last_vola = x[0, -1].item()  # Assuming first feature is volatility and it's scaled
             naive_pred = torch.full((1, horizon), last_vola)
         
             predictions.append(naive_pred)
-            targets.append(seq_y)
-    
+            targets.append(y)
+
     # Stack
         predictions = torch.cat(predictions, dim=0)
         targets = torch.cat(targets, dim=0)
@@ -85,7 +105,7 @@ class NaiveBaseline:
         return {"MAE": mae, "MSE": mse}
 
 
-# ================== EVALUATION METRICS ==================
+#  EVALUATION METRICS 
 
 def calculate_relative_metrics(model_mae, model_mse, naive_mae, naive_mse):
     """
@@ -102,168 +122,101 @@ def calculate_relative_metrics(model_mae, model_mse, naive_mae, naive_mse):
     
     return rmae, rmse
 
-# events_df = pd.read_csv("/Users/burakberkerbasergun/Desktop/master thesis/VolaBERT/vola-bert/data/macro_events_us.csv")
+#  TRAINING FUNCTION 
 
-# events_df = events_df.rename(columns={
-#     "event_time_et": "datetime"
-# })
-
-# events_df["datetime"] = pd.to_datetime(events_df["datetime"], utc=True).dt.tz_convert("America/New_York")
-# ================== TRAINING FUNCTION ==================
-
-def train_volabert_single_config(config, run_dir, data_scenario="full", ablation_name="default"):
+def train_equitybert_single_config(config, run_dir, data_scenario="full", ablation_name="default"):
     """
-    Train Vola-BERT for a single configuration (lookback, forecast)
-    
+    Train EquityBERT for a single configuration (lookback, forecast)
+
     Args:
-        config: Dictionary with lookback, forecast, and other hyperparameters
-        data_scenario: "full" (100% training data) or "scarce" (10% training data)
-        
+        config        : dict with lookback, forecast, and other hyperparameters
+        run_dir       : versioned output directory
+        data_scenario : "full" (100% training data) or "scarce" (10%)
+        ablation_name : label for this ablation variant
+
     Returns:
-        Dictionary with results including model and naive baseline metrics
+        dict with all metrics and paths
     """
     
     print("\n" + "=" * 80)
     print(f"Training Configuration: {config['lookback']}→{config['forecast']}")
     print(f"Data Scenario: {data_scenario.upper()}")
+    print(f"Ablation: {ablation_name}")
     print("=" * 80)
-    
-    # Determine fine-tuning percentage based on scenario
+
     fine_tuning_pct = None if data_scenario == "full" else 0.1
-    
-    # ========== STEP 1: Load Datasets ==========
+
+    #  Load Datasets 
     print("\nLoading datasets...")
-    
-    train_dataset = Dataset_SP500_1H(
+
+    common_kwargs = dict(
         data_path=config["data_path"],
-        events_df=None,  # Assuming events_df is defined elsewhere
-        flag="train",
+        events_df=config.get("events_df"),
         size=(config["lookback"], config["forecast"]),
-#features=config["features"],
-#use_technical=config["use_technical"],
         use_events=config["use_events"],
         use_event_type=config["use_event_type"],
         use_event_impact=config["use_event_impact"],
-        use_explainable=False,
-#use_interday=config["use_interday"],
-#use_explainable=config["use_explainable"],
-        fine_tuning_pct=fine_tuning_pct,  # None for full, 0.1 for scarce
-       # scaler=None,
-       # use_volume_state=config["use_volume_state"],
-       mode="24h",  # Use 24h mode to keep all hours (including overnight)
+        use_explainable=True,
+        mode=config.get("mode", "24h"),
     )
-    
-    # Get shared scaler from training set
-    #shared_scaler = train_dataset.scaler
-    
-    val_dataset = Dataset_SP500_1H(
-        data_path=config["data_path"],
-        flag="val",
-        size=(config["lookback"], config["forecast"]),
-        events_df=None,  # Assuming events_df is defined elsewhere
-       # features=config["features"],
-       # use_technical=config["use_technical"],
-        use_events=config["use_events"],
-        use_event_type=config["use_event_type"],
-        use_event_impact=config["use_event_impact"],
-        use_explainable=False,
-       # use_interday=config["use_interday"],
-       # use_explainable=config["use_explainable"],
-        fine_tuning_pct=None,
-        #scaler=shared_scaler,
-       # use_volume_state=config["use_volume_state"],
-        mode="24h",  # Use 24h mode to keep all hours (including overnight
-    )
-    
-    test_dataset = Dataset_SP500_1H(
-        data_path=config["data_path"],
-        flag="test",
-        size=(config["lookback"], config["forecast"]),
-        events_df=None,  # Assuming events_df is defined elsewhere
-        #features=config["features"],
-        #use_technical=config["use_technical"],
-        use_events=config["use_events"],
-        use_event_type=config["use_event_type"],
-        use_event_impact=config["use_event_impact"],
-        use_explainable=False,
-        #use_interday=config["use_interday"],
-        #use_explainable=config["use_explainable"],
-        fine_tuning_pct=None,
-        #scaler=shared_scaler,
-        #use_volume_state=config["use_volume_state"],
-        mode="24h",  # Use 24h mode to keep all hours (including overnight
-    )
-    # start_date = min(train_dataset.start_date, val_dataset.start_date, test_dataset.start_date)
-    # end_date = max(train_dataset.end_date, val_dataset.end_date, test_dataset.end_date)
-    # print(f"Overall date range: {start_date} to {end_date}")
-    # print(f"Train: {len(train_dataset)} samples")
-    # print(f"Train date range: {train_dataset.start_date} to {train_dataset.end_date}")
-    # print(f"Val:   {len(val_dataset)} samples")
-    # print(f"Val date range: {val_dataset.start_date} to {val_dataset.end_date}")
-    # print(f"Test:  {len(test_dataset)} samples")
-    # print(f"Test date range: {test_dataset.start_date} to {test_dataset.end_date}")
-    # #sys.exit(0)
-    print(f"Train: {len(train_dataset)} samples")
-    print(f"Val:   {len(val_dataset)} samples")
-    print(f"Test:  {len(test_dataset)} samples")
-    # ========== STEP 2: Evaluate Naive Baseline ==========
+
+    train_dataset = Dataset_SP500_1H(flag="train", fine_tuning_pct=fine_tuning_pct, **common_kwargs)
+    val_dataset   = Dataset_SP500_1H(flag="val",   **common_kwargs)
+    test_dataset  = Dataset_SP500_1H(flag="test",  **common_kwargs)
+
+    print(f"Train: {len(train_dataset):,} samples  ({train_dataset.start_date} → {train_dataset.end_date})")
+    print(f"Val:   {len(val_dataset):,} samples  ({val_dataset.start_date} → {val_dataset.end_date})")
+    print(f"Test:  {len(test_dataset):,} samples  ({test_dataset.start_date} → {test_dataset.end_date})")
+
+    #  Evaluate Naive Baseline
     print("\n" + "-" * 80)
     print("Evaluating Naive Baseline")
     print("-" * 80)
-    
+
     naive_model = NaiveBaseline()
     naive_results = naive_model.evaluate(test_dataset)
-    
-    # ========== STEP 3: Setup Vola-BERT Model ==========
+
+    # Setup EquityBERT Model 
     print("\n" + "-" * 80)
     print("Setting up EquityBERT Model")
     print("-" * 80)
-    
-    # Infer number of input features from sample
-    sample_x, sample_y = train_dataset[0]
-    if isinstance(sample_x, tuple):
-        num_series = sample_x[0].shape[0]
-    else:
-        num_series = sample_x.shape[0]
-    
+
+    sample = train_dataset[0]
+    num_series = sample[0][0].shape[0]
+
     print(f"Input features: {num_series}")
     print(f"Lookback: {config['lookback']} hours")
     print(f"Forecast: {config['forecast']} hours")
     print(f"BERT layers: {config['n_layer']}")
 
-    # Semantic tokens configuration
     semantic_tokens = {
-        "market_session": 4,  # None, Early, Mid, Late
+        "market_session": SEMANTIC_TOKEN_VOCAB["market_session"],
     }
     if config["use_event_type"]:
-        semantic_tokens["event_type"] = 5  # None, FOMC, NFP, CPI, Unemployment
+        semantic_tokens["event_type"] = SEMANTIC_TOKEN_VOCAB["event_type"]
     if config["use_event_impact"]:
-        semantic_tokens["event_impact"] = 4  # None, Low, Medium, High
-    # # # Create model
-    # # model = EquityBERT(
-    # #     num_series=num_series,
-    # #     input_len=config["lookback"],
-    # #     pred_len=config["forecast"],
-    # #     n_layer=config["n_layer"],
-    # #     revin=True,
-    # #     semantic_tokens=semantic_tokens,
-    # )
+        semantic_tokens["event_impact"] = SEMANTIC_TOKEN_VOCAB["event_impact"]
 
-    model = LSTMModel(
+    model = EquityBERT(
         num_series=num_series,
-        hidden_size=128,
-        num_layers=2,
-        pred_len=config["forecast"]
-)
-    
-    print(f"\n✓ Model parameters:")
-    # print(f"  Total:     {model.num_params['total']:,}")
-    print(f"  Trainable: {model.num_params['trainable']:,}")
-    
-    # ========== STEP 4: Train Model ==========
-    print("\n" + "-" * 80)
+        input_len=config["lookback"],
+        pred_len=config["forecast"],
+        n_layer=config["n_layer"],
+        revin=True,
+        semantic_tokens=semantic_tokens,
+    )
+
+    params = model.num_params
+    print(f"\nModel parameters:")
+    print(f"  Total:     {params['total']:,}")
+    print(f"  Trainable: {params['trainable']:,}")
+
+    print("=" * 80)
     print("Training EquityBERT")
     print("-" * 80)
+
+    #  Train Model 
+ 
     
     use_amp = torch.cuda.is_available()
     scenario_name = f"{ablation_name}_{config['lookback']}to{config['forecast']}_{data_scenario}"
@@ -282,7 +235,7 @@ def train_volabert_single_config(config, run_dir, data_scenario="full", ablation
         save_path=checkpoint_dir,
         patience=config["patience"],
         verbose=True,
-        num_workers=2,  # Use 2 workers for data loading (adjust based on your CPU)
+        num_workers=2,  # Use 2 workers for data loading (adjust based on my CPU)
     )
 
     train_mae, val_mae, train_mse, val_mse = trainer.train(
@@ -292,46 +245,41 @@ def train_volabert_single_config(config, run_dir, data_scenario="full", ablation
         max_epochs=config["max_epochs"],
         lr=config["lr"],
     )
-    plt.figure(figsize=(12, 5))
-    plt.subplot(1, 2, 1)
-    plt.plot(train_mae, label="Train MAE")
-    plt.plot(val_mae, label="Val MAE")
-    plt.xlabel("Epoch")
-    plt.ylabel("MAE")
-    plt.title(f"MAE Curves - {config['lookback']}→{config['forecast']})")
-    plt.legend()
-    plt.grid()
+     # Loss curves
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    plt.subplot(1, 2, 2)
-    plt.plot(train_mse, label="Train MSE")
-    plt.plot(val_mse, label="Val MSE")
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE")
-    plt.title(f"MSE Curves - {config['lookback']}→{config['forecast']})")
-    plt.legend()
-    plt.grid()
+    ax1.plot(train_mae, label="Train MAE")
+    ax1.plot(val_mae, label="Val MAE")
+    ax1.set(xlabel="Epoch", ylabel="MAE",
+            title=f"MAE — {config['lookback']}→{config['forecast']}")
+    ax1.legend()
+    ax1.grid(True)
 
+    ax2.plot(train_mse, label="Train MSE")
+    ax2.plot(val_mse, label="Val MSE")
+    ax2.set(xlabel="Epoch", ylabel="MSE",
+            title=f"MSE — {config['lookback']}→{config['forecast']}")
+    ax2.legend()
+    ax2.grid(True)
+
+    plt.tight_layout()
     plot_path = os.path.join(checkpoint_dir, f"loss_{scenario_name}.png")
-    
-    plt.savefig(plot_path)
+    plt.savefig(plot_path, dpi=150)
     plt.close()
-    print(f"\n Training complete. Loss curves saved to {plot_path}")
+    print(f"\nTraining complete. Loss curves saved to {plot_path}")
 
-
-    print("Overfitting Check:")
+    # Overfitting check
+    print("\nOverfitting Check:")
     print(f"  Final Train MAE: {train_mae[-1]:.6f}")
     print(f"  Final Val MAE:   {val_mae[-1]:.6f}")
     if val_mae[-1] > min(val_mae):
-        print("  Warning: Validation MAE increased at the end of training. Possible overfitting.")
+        print("  Warning: Validation MAE increased — possible overfitting.")
     else:
-        print("   No  overfitting detected.")
-    print(f"  Final Train MSE: {train_mse[-1]:.6f}")
-    print(f"  Final Val MSE:   {val_mse[-1]:.6f}")
-    if val_mse[-1] > min(val_mse):
-        print("  Warning: Validation MSE increased at the end of training. Possible overfitting.")
+        print("  No overfitting detected.")
+
 
     
-    # ========== STEP 5: Test Model ==========
+    # Test Model 
     print("\n" + "-" * 80)
     print("Evaluating EquityBERT on Test Set")
     print("-" * 80)
@@ -361,7 +309,7 @@ def train_volabert_single_config(config, run_dir, data_scenario="full", ablation
     print(f"\nEquityBERT Test MAE: {model_mae:.6f}")
     print(f"EquityBERT Test MSE: {model_mse:.6f}")
 
-    # ========== STEP 6: Calculate Relative Metrics ==========
+    #  Calculate Relative Metrics 
     print("\n" + "-" * 80)
     print("Calculating Relative Metrics (vs Naive Baseline)")
     print("-" * 80)
@@ -381,7 +329,7 @@ def train_volabert_single_config(config, run_dir, data_scenario="full", ablation
         degradation = (rmae - 1) * 100
         print(f"\nEquityBERT is {degradation:.1f}% worse than naive baseline")
 
-    # ========== Return Results ==========
+    #  Return Results 
     results = {
         "config": config,
         "data_scenario": data_scenario,
@@ -398,7 +346,7 @@ def train_volabert_single_config(config, run_dir, data_scenario="full", ablation
     return results
 
 
-# ================== MAIN ENTRY POINT ==================
+#  MAIN ENTRY POINT 
 
 def main():
     """
@@ -406,89 +354,80 @@ def main():
     
     Trains Vola-BERT on multiple horizons following the paper:
     - (40→5): Short-term forecasting
-    - (50→10): Medium-term forecasting
-    - (60→20): Long-term forecasting
+    Ablation configs loop over event feature combinations.
     
     For each horizon, tests both:
     - Full data scenario (100% of training data)
-    - Data-scarce scenario (10% of training data)
     """
     # run versioning
 
     base_runs_dir = "runs"
     os.makedirs(base_runs_dir, exist_ok=True)
 
-    #mevcut runlari say
     existing = [d for d in os.listdir(base_runs_dir) if d.startswith("v")]
     run_id = len(existing) + 1
     run_dir = os.path.join(base_runs_dir, f"v{run_id}")
     os.makedirs(run_dir, exist_ok=True)
     print(f"\nsaving results to {run_dir}")
-    print("\n" + "=" * 80)
+    print("\n" + "-" * 80)
     print("EquityBERT Training on S&P 500 Hourly Data")
     print("Following ICAIF 2025 Paper Methodology")
-    print("=" * 80)
+    print("*" * 80)
     
     # Base configuration (shared across all experiments)
+    events_df = pd.read_csv("/Users/burakberkerbasergun/Desktop/master thesis/VolaBERT/vola-bert/NEW_macro_events_us.csv")
+    events_df = events_df.rename(columns={"event_time_et": "datetime"})
+    events_df["impact"]= "NONE"  # Placeholder impact since we don't have actual impact data for these events
+    events_df["datetime"] = pd.to_datetime(
+        events_df["datetime"], utc=True
+    ).dt.tz_convert("America/New_York")
+
     base_config = {
         "data_path": "/Users/burakberkerbasergun/Desktop/master thesis/VolaBERT/vola-bert/data/processed/ES_1h.parquet",
         "root_path": current_dir,
+        "events_df": events_df,
         "n_layer": 4,               # BERT layers
         "batch_size": 32,
-        "max_epochs": 50,
+        "max_epochs": 150,
         "lr": 1e-4,
         "patience": 10,
         "features": "MS",           # Multivariate to univariate
-        "use_technical": True,
-        "use_events": False,
-        "use_event_type": False,
-        "use_event_impact": False,
-        "use_interday": True,
-        "use_explainable": True,
-        "use_volume_state": False,
+        # "use_technical": True,
+        # "use_events": False,
+        # "use_event_type": False,
+        # "use_event_impact": False,
+        # "use_interday": True,
+        # "use_explainable": True,
+        # "use_volume_state": False,
     }
     
     # Horizons to test (matching paper Table 2 and Table 3)
     horizons = [
         {"lookback": 24, "forecast": 5},    # Short-term
-        #{"lookback": 50, "forecast": 10},   # Medium-term
+        {"lookback": 50, "forecast": 10},   # Medium-term
         #{"lookback": 60, "forecast": 20},   # Long-term
     ]
-    # ablation_configs = [
-    #     {
-    #         "name": "No Events",
-    #         "use_events": False,
-    #         "use_event_type": False,
-    #         "use_event_impact": False,
-    #     },
-    #     {
-    #         "name": "Event Type Only",
-    #         "use_events": True,
-    #         "use_event_type": True,
-    #         "use_event_impact": False,
-    #     },
-    #     {
-    #         "name": "FULL EVENTS",
-    #         "use_events": True,
-    #         "use_event_type": True,
-    #         "use_event_impact": False,
-    #     },
-    #     {
-    #         "name": "Improved Timing Events",
-    #         "use_events": True,
-    #         "use_event_type": False,
-    #         "use_event_impact": False,
-    #     }
-    # ]
-
     ablation_configs = [
-    {
-        "name": "LSTM_BASE",
-        "use_events": False,
-        "use_event_type": False,
-        "use_event_impact": False,
-    }
-]
+        {
+            "name": "No Events",
+            "use_events": False,
+            "use_event_type": False,
+            "use_event_impact": False,
+        },
+        {
+            "name": "Event Type Only",
+            "use_events": True,
+            "use_event_type": True,
+            "use_event_impact": False,
+        },
+        {
+            "name": "Improved Timing Events",
+            "use_events": True,
+            "use_event_type": False,
+            "use_event_impact": False,
+        }
+    ]
+
 
     # Store all results
     all_results = []
@@ -496,6 +435,9 @@ def main():
     # Train on each horizon and data scenario
     for horizon in horizons:
         for ablation in ablation_configs:
+            if ablation["use_events"] and events_df is None:
+                print(f"\nSkipping {ablation['name']} for Horizon {horizon['lookback']}→{horizon['forecast']} because events_df is not available.")
+                continue
             print("\n" + "=" * 80)
             print(f"Running Ablation: {ablation['name']} for Horizon: {horizon['lookback']}→{horizon['forecast']}")
             print("=" * 80)
@@ -503,16 +445,15 @@ def main():
             config = {**base_config, **horizon, **ablation}
         
         # Full-data scenario
-            results_full = train_volabert_single_config(config, run_dir, data_scenario="full"
-                                                        , ablation_name=ablation["name"])
+            results_full = train_equitybert_single_config(
+                config, run_dir,
+                data_scenario="full",
+                ablation_name=ablation["name"]
+            )
             all_results.append(results_full)
         
-        # Data-scarce scenario
-        # print("DATA-SCARCE SCENARIO (10% training data)")
-        # results_scarce = train_volabert_single_config(config, data_scenario="scarce")
-        # all_results.append(results_scarce)
     
-    # ========== Print Summary Table ==========
+    #  Summary Table 
     print("\n" + "=" * 80)
     print("TRAINING COMPLETE - RESULTS SUMMARY")
     print("=" * 80)
@@ -520,37 +461,26 @@ def main():
     print("\nResults saved to: vola_bert_sp500_results.txt")
     
     # Save detailed results
-    results_path = os.path.join(run_dir, f"run_version_{run_id}_equity_bert_sp500_results.txt")
+    results_path = os.path.join(run_dir, f"equitybert_results_v{run_id}.txt")
     with open(results_path, "w") as f:
-        f.write("=" * 80 + "\n")
-        f.write("EquityBERT on S&P 500 Hourly Data - Results Summary\n")
-        f.write("=" * 80 + "\n\n")
-        
-        for result in all_results:
-            f.write(f"\nConfiguration: {result['config']['lookback']}→{result['config']['forecast']}\n")
-            f.write(f"Ablation: {result.get('ablation_name')}\n")
-            f.write(f"Data Scenario: {result['data_scenario'].upper()}\n")
-            f.write("-" * 80 + "\n")
-            f.write(f"Naive Baseline MAE: {result['naive_mae']:.6f}\n")
-            f.write(f"Naive Baseline MSE: {result['naive_mse']:.6f}\n")
-            f.write(f"EquityBERT MAE:      {result['model_mae']:.6f}\n")
-            f.write(f"EquityBERT MSE:      {result['model_mse']:.6f}\n")
-            f.write(f"rMAE:               {result['rmae']:.4f}\n")
-            f.write(f"rMSE:               {result['rmse']:.4f}\n")
-            f.write(f"Checkpoint:         {result['checkpoint_dir']}/\n")
-            f.write("\n")
-    
-    print("\nAll experiments completed successfully!")
-    print("Check 'vola_bert_sp500_results.txt' for detailed results")
-    print("Model checkpoints saved in 'checkpoints_sp500_*' directories")
-    
-    #  Export to CSV #
+        f.write("EquityBERT on S&P 500 Hourly Data — Results Summary\n")
+        f.write("=" * 60 + "\n\n")
+        for r in all_results:
+            f.write(f"{r['config']['lookback']}→{r['config']['forecast']}  "
+                    f"[{r['data_scenario']}]  Ablation: {r['ablation_name']}\n")
+            f.write(f"  Naive MAE: {r['naive_mae']:.6f}   MSE: {r['naive_mse']:.6f}\n")
+            f.write(f"  Model MAE: {r['model_mae']:.6f}   MSE: {r['model_mse']:.6f}\n")
+            f.write(f"  rMAE: {r['rmae']:.4f}   rMSE: {r['rmse']:.4f}\n")
+            f.write(f"  Checkpoint: {r['checkpoint_dir']}\n\n")
+    print(f"Results TXT: {results_path}")
+
     df_results = pd.DataFrame(all_results)
-    csv_path = os.path.join(run_dir, f"run_version_{run_id}_equity_bert_sp500_results.csv")
+    csv_path = os.path.join(run_dir, f"equitybert_results_v{run_id}.csv")
     df_results.to_csv(csv_path, index=False)
-    print(f"\nResults CSV saved to: {csv_path}")
+    print(f"Results CSV: {csv_path}")
 
     return all_results
+
 
 if __name__ == "__main__":
     try:
