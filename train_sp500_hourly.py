@@ -341,6 +341,10 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
         "rmse": rmse,
         "checkpoint_dir": checkpoint_dir,
         "ablation_name": ablation_name,
+        "train_mae_history": train_mae,
+        "val_mae_history": val_mae,
+        "train_mse_history": train_mse,
+        "val_mse_history": val_mse,
     }
     
     return results
