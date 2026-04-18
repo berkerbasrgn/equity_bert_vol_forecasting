@@ -451,9 +451,35 @@ def main():
                 ablation_name=ablation["name"]
             )
             all_results.append(results_full)
+
+    n = len(all_results)
+    if n > 0:
+        fig, axes = plt.subplots(n, 2, figsize=(14, 4 * n))
+        if n == 1:
+            axes = axes.reshape(1, -1)
+ 
+        for i, r in enumerate(all_results):
+            label = f"{r['ablation_name']} {r['config']['lookback']}→{r['config']['forecast']}"
+ 
+            axes[i, 0].plot(r["train_mae_history"], label="Train MAE", linewidth=0.8)
+            axes[i, 0].plot(r["val_mae_history"], label="Val MAE", linewidth=0.8)
+            axes[i, 0].set(xlabel="Epoch", ylabel="MAE", title=f"MAE — {label}")
+            axes[i, 0].legend(fontsize=8)
+            axes[i, 0].grid(True, alpha=0.3)
+ 
+            axes[i, 1].plot(r["train_mse_history"], label="Train MSE", linewidth=0.8)
+            axes[i, 1].plot(r["val_mse_history"], label="Val MSE", linewidth=0.8)
+            axes[i, 1].set(xlabel="Epoch", ylabel="MSE", title=f"MSE — {label}")
+            axes[i, 1].legend(fontsize=8)
+            axes[i, 1].grid(True, alpha=0.3)
+ 
+        plt.tight_layout()
+        combined_path = os.path.join(run_dir, f"all_loss_curves_v{run_id}.png")
+        plt.savefig(combined_path, dpi=150)
+        plt.close()
+        print(f"\nCombined loss curves saved to: {combined_path}")
         
-    
-    #  Summary Table 
+    #  Summary Table
     print("\n" + "=" * 80)
     print("TRAINING COMPLETE - RESULTS SUMMARY")
     print("=" * 80)
@@ -473,6 +499,19 @@ def main():
             f.write(f"  rMAE: {r['rmae']:.4f}   rMSE: {r['rmse']:.4f}\n")
             f.write(f"  Checkpoint: {r['checkpoint_dir']}\n\n")
     print(f"Results TXT: {results_path}")
+    csv_rows = []
+    for r in all_results:
+        csv_rows.append({
+            "horizon": f"{r['config']['lookback']}→{r['config']['forecast']}",
+            "ablation": r["ablation_name"],
+            "data_scenario": r["data_scenario"],
+            "naive_mae": r["naive_mae"],
+            "naive_mse": r["naive_mse"],
+            "model_mae": r["model_mae"],
+            "model_mse": r["model_mse"],
+            "rmae": r["rmae"],
+            "rmse": r["rmse"],
+        })
 
     df_results = pd.DataFrame(all_results)
     csv_path = os.path.join(run_dir, f"equitybert_results_v{run_id}.csv")
@@ -480,6 +519,7 @@ def main():
     print(f"Results CSV: {csv_path}")
 
     return all_results
+
 
 
 if __name__ == "__main__":
