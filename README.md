@@ -198,14 +198,16 @@ The trainer computes:
 
 <img width="2100" height="3600" alt="all_loss_curves_v22" src="https://github.com/user-attachments/assets/5542e2be-dd26-4694-8861-1b9347b0cf28" />
 
-| Horizon | Ablation Type           | Val MSE | Test MAE | Test rMAE | Test rMSE |
-|--------|------------------------|--------|----------|-----------|-----------|
-| 24→5   | No Events              | 0.3564 | 0.3206   | 0.3739    | 0.2074    |
-| 24→5   | Event Type + Timing    | 0.3596 | 0.3239   | 0.3777    | 0.2087    |
-| 24→5   | Event Timing Only      | 0.3593 | 0.3234   | 0.3772    | 0.2083    |
-| 50→10  | No Events              | 0.4284 | 0.3705   | 0.4253    | 0.2522    |
-| 50→10  | Event Type + Timing    | 0.4364 | 0.3722   | 0.4273    | 0.2544    |
-| 50→10  | Event Timing Only      | 0.4329 | 0.3648   | 0.4188    | 0.2522    |
+## Study Results (with Naive Baseline Comparison)
+
+| Horizon | Ablation Type        | Val MSE | Test MAE | Test MSE | Naive MAE | Naive MSE | rMAE   | rMSE   | Δ vs Naive |
+|--------|----------------------|--------|----------|----------|-----------|-----------|--------|--------|------------|
+| 24→5   | No Events            | 0.3564 | 0.3206   | 0.2960   | 0.8575    | 1.4272    | 0.3739 | 0.2074 | -62.6%     |
+| 24→5   | Event Type + Timing  | 0.3596 | 0.3239   | 0.2979   | 0.8575    | 1.4272    | 0.3777 | 0.2087 | -62.2%     |
+| 24→5   | Event Timing Only    | 0.3593 | 0.3234   | 0.2973   | 0.8575    | 1.4272    | 0.3772 | 0.2083 | -62.3%     |
+| 50→10  | No Events            | 0.4284 | 0.3705   | 0.3978   | 0.8710    | 1.5777    | 0.4253 | 0.2522 | -57.5%     |
+| 50→10  | Event Type + Timing  | 0.4364 | 0.3722   | 0.4014   | 0.8710    | 1.5777    | 0.4273 | 0.2544 | -57.3%     |
+| 50→10  | Event Timing Only    | 0.4329 | 0.3648   | 0.3978   | 0.8710    | 1.5777    | 0.4188 | 0.2522 | -58.1%     |
 
 
 After training, checkpoints and logs are saved to:
