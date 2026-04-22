@@ -1,0 +1,15 @@
+LSTM Baseline — Results Summary
+============================================================
+
+Horizon: 24h → 5h
+  Naive MAE: 0.857473   MSE: 1.427150
+  Model MAE: 0.309338   MSE: 0.254451
+  rMAE: 0.3608   rMSE: 0.1783
+  LSTM is 63.9% better than naive
+
+Horizon: 50h → 10h
+  Naive MAE: 0.871045   MSE: 1.577719
+  Model MAE: 0.377486   MSE: 0.372216
+  rMAE: 0.4334   rMSE: 0.2359
+  LSTM is 56.7% better than naive
+
