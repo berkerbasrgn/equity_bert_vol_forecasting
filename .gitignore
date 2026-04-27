@@ -1,0 +1,43 @@
+# ── macOS ────────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[codz]
+*.so
+*.egg-info/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Environment variables ─────────────────────────────────────────────────────
+.env
+.envrc
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Data files ────────────────────────────────────────────────────────────────
+# Raw and processed Parquet files are large — download with download_databento.py
+data/raw/
+data/processed/*.parquet
+
+# ── Training outputs ──────────────────────────────────────────────────────────
+# runs/ can reach several GB; checkpoints can be 100-200 MB each
+runs/
+checkpoints_*/
+*.pth
+
+# ── Generated outputs ─────────────────────────────────────────────────────────
+*.xlsx
+
+# ── uv ───────────────────────────────────────────────────────────────────────
+# uv.lock is intentionally committed for reproducibility
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.ruff_cache/
