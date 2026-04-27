@@ -118,7 +118,7 @@ python train_lstm.py
 ```
 
 ### Configuration
-
+#
 Edit the `base_config` and `horizons` dicts at the bottom of `train_sp500_hourly_RAW.py`:
 
 ```python
