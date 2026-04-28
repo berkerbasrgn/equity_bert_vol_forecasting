@@ -1,4 +1,4 @@
-# EquityBERT: S&P 500 Volatility Forecasting
+## EquityBERT: S&P 500 Volatility Forecasting
 
 A PyTorch-based volatility forecasting framework for E-mini S&P 500 futures (ES.FUT) at hourly frequency, adapted from the original Vola-BERT model for FX rate forecasting.
 
