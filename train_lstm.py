@@ -306,6 +306,13 @@ def run_experiment(run_dir, config):
  
     preds = torch.cat(preds)
     trues = torch.cat(trues)
+    save_dir = os.path.join(run_dir, "predictions")
+    os.makedirs(save_dir, exist_ok=True)
+
+    horizon_tag = f"{config['lookback']}to{config['forecast']}" 
+    np.save(os.path.join(save_dir, f"y_true_{horizon_tag}.npy"), trues.cpu().numpy())
+    np.save(os.path.join(save_dir, f"lstm_pred_{horizon_tag}.npy"), preds.cpu().numpy())
+    print(f"Predictions saved to {save_dir}")
  
     model_mae = torch.mean(torch.abs(preds - trues)).item()
     model_mse = torch.mean((preds - trues) ** 2).item()
