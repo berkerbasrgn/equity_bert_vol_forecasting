@@ -43,6 +43,8 @@ class NaiveBaseline:
         return {
             "MAE": torch.mean(torch.abs(predictions - targets)).item(),
             "MSE": torch.mean((predictions - targets) ** 2).item(),
+            "preds": predictions,
+            "trues": targets,
         }
 
 
@@ -173,6 +175,12 @@ def run_experiment(run_dir, config):
 
     # ── BASELINE ──
     naive_results = NaiveBaseline().evaluate(test_ds)
+    save_dir = os.path.join(run_dir, "predictions")
+    os.makedirs(save_dir, exist_ok=True)
+    horizon_tag = f"{config['lookback']}to{config['forecast']}"
+    np.save(os.path.join(save_dir, f"naive_preds_{horizon_tag}.npy"), naive_results["preds"].cpu().numpy())
+    np.save(os.path.join(save_dir, f"y_true_{horizon_tag}.npy"), naive_results["trues"].cpu().numpy())
+
     naive_mae, naive_mse = naive_results["MAE"], naive_results["MSE"]
     print(f"Naive MAE: {naive_mae:.6f}  |  Naive MSE: {naive_mse:.6f}")
 
