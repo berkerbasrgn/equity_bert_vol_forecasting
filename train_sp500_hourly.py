@@ -292,6 +292,8 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
     # Calculate MSE separately (trainer only returns MAE)
     model.eval()
     test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False, pin_memory=True, num_workers=2)
+    preds = []
+    trues = []
     mse_list = []
     
     with torch.no_grad():
@@ -300,11 +302,26 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
             # Forward pass
             outputs = model(batch_x)
             batch_y = batch_y.to(outputs.device)
+
+            preds.append(outputs.cpu())
+            trues.append(batch_y.cpu())
+
             # Calculate MSE
             mse = torch.mean((outputs - batch_y) ** 2)
             mse_list.append(mse.item())
-    
+
+    preds = torch.cat(preds)
+    trues = torch.cat(trues)
+
     model_mse = np.mean(mse_list)
+    save_dir = os.path.join(run_dir, "predictions")
+    os.makedirs(save_dir, exist_ok=True)
+
+    horizon_tag = f"{config['lookback']}to{config['forecast']}"
+    ablation_tag = ablation_name.replace(" ", "_")
+    np.save(os.path.join(save_dir, f"y_true_{ablation_tag}_{horizon_tag}.npy"), trues.cpu().numpy())
+    np.save(os.path.join(save_dir, f"bert_pred_{ablation_tag}_{horizon_tag}.npy"), preds.cpu().numpy())
+    print(f"Predictions saved to {save_dir}")
 
     print(f"\nEquityBERT Test MAE: {model_mae:.6f}")
     print(f"EquityBERT Test MSE: {model_mse:.6f}")
