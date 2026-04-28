@@ -1,0 +1,39 @@
+LSTM Baseline — Results Summary
+============================================================
+
+Configuration:
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.2
+  batch_size: 128
+  epochs: 100
+  lr: 0.0003
+  weight_decay: 0.0005
+  patience: 15
+  use_technical: True
+  use_interday: True
+
+Horizon: 24h → 5h
+  Train: 11,643 (70%)  2019-01-03 → 2024-01-21
+  Val:   2,505 (15%)  2024-01-23 → 2025-02-23
+  Test:  2,506 (15%)  2025-02-25 → 2026-03-29
+
+  Naive MAE: 0.969196   MSE: 2.092139
+  Model MAE: 0.357067   MSE: 0.384347
+  rMAE: 0.3684   rMSE: 0.1837
+  LSTM is 63.2% better than naive
+
+------------------------------------------------------------
+
+Horizon: 50h → 10h
+  Train: 3,563 (70%)  2019-01-08 → 2024-01-14
+  Val:   765 (15%)  2024-01-16 → 2025-02-16
+  Test:  779 (15%)  2025-02-18 → 2026-03-29
+
+  Naive MAE: 1.039990   MSE: 2.482603
+  Model MAE: 0.445026   MSE: 0.555781
+  rMAE: 0.4279   rMSE: 0.2239
+  LSTM is 57.2% better than naive
+
+------------------------------------------------------------
+
