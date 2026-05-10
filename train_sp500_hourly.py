@@ -141,7 +141,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
     print("\n" + "=" * 80)
     print(f"Training Configuration: {config['lookback']}→{config['forecast']}")
     print(f"Data Scenario: {data_scenario.upper()}")
-    print(f"Ablation: {ablation_name}")
+    print(f"Sensitivity Analysis: {ablation_name}")
     print("=" * 80)
 
     fine_tuning_pct = None if data_scenario == "full" else 0.1
@@ -164,9 +164,25 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
     val_dataset   = Dataset_SP500_1H(flag="val",   **common_kwargs)
     test_dataset  = Dataset_SP500_1H(flag="test",  **common_kwargs)
 
-    print(f"Train: {len(train_dataset):,} samples  ({train_dataset.start_date} → {train_dataset.end_date})")
-    print(f"Val:   {len(val_dataset):,} samples  ({val_dataset.start_date} → {val_dataset.end_date})")
-    print(f"Test:  {len(test_dataset):,} samples  ({test_dataset.start_date} → {test_dataset.end_date})")
+    train_range = f"{train_dataset.start_date.strftime('%Y-%m-%d')} → {train_dataset.end_date.strftime('%Y-%m-%d')}"
+    val_range   = f"{val_dataset.start_date.strftime('%Y-%m-%d')} → {val_dataset.end_date.strftime('%Y-%m-%d')}"
+    test_range  = f"{test_dataset.start_date.strftime('%Y-%m-%d')} → {test_dataset.end_date.strftime('%Y-%m-%d')}"
+
+    print(f"Train: {len(train_dataset):,} samples  ({train_range})")
+    print(f"Val:   {len(val_dataset):,} samples  ({val_range})")
+    print(f"Test:  {len(test_dataset):,} samples  ({test_range})")
+
+    # Gap check: splits are contiguous at the week-index level (70/15/15 cut).
+    # Warn if the calendar boundary between splits shows a jump > 14 days,
+    # which would indicate filtered-out weeks creating a visible hole.
+    train_val_gap = (val_dataset.start_date - train_dataset.end_date).days
+    val_test_gap  = (test_dataset.start_date - val_dataset.end_date).days
+    if train_val_gap > 14:
+        print(f"  Note: {train_val_gap}-day calendar gap between train and val "
+              f"(filtered weeks excluded from both splits — expected).")
+    if val_test_gap > 14:
+        print(f"  Note: {val_test_gap}-day calendar gap between val and test "
+              f"(filtered weeks excluded from both splits — expected).")
 
     #  Evaluate Naive Baseline
     print("\n" + "-" * 80)
@@ -245,7 +261,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
         max_epochs=config["max_epochs"],
         lr=config["lr"],
     )
-     # Loss curves
+    # Loss curves
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
     ax1.plot(train_mae, label="Train MAE")
@@ -262,9 +278,13 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
     ax2.legend()
     ax2.grid(True)
 
+    date_info = (
+        f"Train: {train_range}   |   Val: {val_range}   |   Test: {test_range}"
+    )
+    fig.suptitle(date_info, fontsize=8, y=1.01)
     plt.tight_layout()
     plot_path = os.path.join(checkpoint_dir, f"loss_{scenario_name}.png")
-    plt.savefig(plot_path, dpi=150)
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"\nTraining complete. Loss curves saved to {plot_path}")
 
@@ -345,6 +365,9 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
         "val_mae_history": val_mae,
         "train_mse_history": train_mse,
         "val_mse_history": val_mse,
+        "train_range": train_range,
+        "val_range": val_range,
+        "test_range": test_range,
     }
     
     return results
@@ -358,7 +381,7 @@ def main():
     
     Trains Vola-BERT on multiple horizons following the paper:
     - (40→5): Short-term forecasting
-    Ablation configs loop over event feature combinations.
+    Sensitivity analysis configs loop over event feature combinations.
     
     For each horizon, tests both:
     - Full data scenario (100% of training data)
@@ -392,7 +415,7 @@ def main():
         "events_df": events_df,
         "n_layer": 4,               # BERT layers
         "batch_size": 32,
-        "max_epochs": 150,
+        "max_epochs": 200,
         "lr": 1e-4,
         "patience": 10,
         "features": "MS",           # Multivariate to univariate
@@ -435,24 +458,24 @@ def main():
 
     # Store all results
     all_results = []
-    
+
     # Train on each horizon and data scenario
     for horizon in horizons:
-        for ablation in ablation_configs:
-            if ablation["use_events"] and events_df is None:
-                print(f"\nSkipping {ablation['name']} for Horizon {horizon['lookback']}→{horizon['forecast']} because events_df is not available.")
+        for variant in sensitivity_configs:
+            if variant["use_events"] and events_df is None:
+                print(f"\nSkipping {variant['name']} for Horizon {horizon['lookback']}→{horizon['forecast']} because events_df is not available.")
                 continue
             print("\n" + "=" * 80)
-            print(f"Running Ablation: {ablation['name']} for Horizon: {horizon['lookback']}→{horizon['forecast']}")
+            print(f"Running Sensitivity Analysis: {variant['name']} for Horizon: {horizon['lookback']}→{horizon['forecast']}")
             print("=" * 80)
         # Merge horizon into base config
-            config = {**base_config, **horizon, **ablation}
-        
+            config = {**base_config, **horizon, **variant}
+
         # Full-data scenario
             results_full = train_equitybert_single_config(
                 config, run_dir,
                 data_scenario="full",
-                ablation_name=ablation["name"]
+                variant_name=variant["name"]
             )
             all_results.append(results_full)
 
@@ -464,16 +487,21 @@ def main():
  
         for i, r in enumerate(all_results):
             label = f"{r['ablation_name']} {r['config']['lookback']}→{r['config']['forecast']}"
- 
+            date_subtitle = (
+                f"Train: {r['train_range']}  |  Val: {r['val_range']}  |  Test: {r['test_range']}"
+            )
+
             axes[i, 0].plot(r["train_mae_history"], label="Train MAE", linewidth=0.8)
             axes[i, 0].plot(r["val_mae_history"], label="Val MAE", linewidth=0.8)
             axes[i, 0].set(xlabel="Epoch", ylabel="MAE", title=f"MAE — {label}")
+            axes[i, 0].set_xlabel(f"Epoch\n{date_subtitle}", fontsize=7)
             axes[i, 0].legend(fontsize=8)
             axes[i, 0].grid(True, alpha=0.3)
- 
+
             axes[i, 1].plot(r["train_mse_history"], label="Train MSE", linewidth=0.8)
             axes[i, 1].plot(r["val_mse_history"], label="Val MSE", linewidth=0.8)
             axes[i, 1].set(xlabel="Epoch", ylabel="MSE", title=f"MSE — {label}")
+            axes[i, 1].set_xlabel(f"Epoch\n{date_subtitle}", fontsize=7)
             axes[i, 1].legend(fontsize=8)
             axes[i, 1].grid(True, alpha=0.3)
  
@@ -497,7 +525,7 @@ def main():
         f.write("=" * 60 + "\n\n")
         for r in all_results:
             f.write(f"{r['config']['lookback']}→{r['config']['forecast']}  "
-                    f"[{r['data_scenario']}]  Ablation: {r['ablation_name']}\n")
+                    f"[{r['data_scenario']}]  Sensitivity Analysis: {r['ablation_name']}\n")
             f.write(f"  Naive MAE: {r['naive_mae']:.6f}   MSE: {r['naive_mse']:.6f}\n")
             f.write(f"  Model MAE: {r['model_mae']:.6f}   MSE: {r['model_mse']:.6f}\n")
             f.write(f"  rMAE: {r['rmae']:.4f}   rMSE: {r['rmse']:.4f}\n")
