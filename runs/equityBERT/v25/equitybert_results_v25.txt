@@ -1,0 +1,39 @@
+EquityBERT on S&P 500 Hourly Data — Results Summary
+============================================================
+
+24→5  [full]  Sensitivity Analysis: No Events
+  Naive MAE: 0.969196   MSE: 2.092139
+  Model MAE: 0.383317   MSE: 0.487178
+  rMAE: 0.3955   rMSE: 0.2329
+  Checkpoint: runs/v25/No Events_24to5_full/checkpoints
+
+24→5  [full]  Sensitivity Analysis: Event Type Only
+  Naive MAE: 0.969196   MSE: 2.092139
+  Model MAE: 0.381238   MSE: 0.477944
+  rMAE: 0.3934   rMSE: 0.2284
+  Checkpoint: runs/v25/Event Type Only_24to5_full/checkpoints
+
+24→5  [full]  Sensitivity Analysis: Event Timing Only
+  Naive MAE: 0.969196   MSE: 2.092139
+  Model MAE: 0.378865   MSE: 0.473521
+  rMAE: 0.3909   rMSE: 0.2263
+  Checkpoint: runs/v25/Event Timing Only_24to5_full/checkpoints
+
+50→10  [full]  Sensitivity Analysis: No Events
+  Naive MAE: 1.039990   MSE: 2.482604
+  Model MAE: 0.452240   MSE: 0.687955
+  rMAE: 0.4349   rMSE: 0.2771
+  Checkpoint: runs/v25/No Events_50to10_full/checkpoints
+
+50→10  [full]  Sensitivity Analysis: Event Type Only
+  Naive MAE: 1.039990   MSE: 2.482604
+  Model MAE: 0.450817   MSE: 0.681455
+  rMAE: 0.4335   rMSE: 0.2745
+  Checkpoint: runs/v25/Event Type Only_50to10_full/checkpoints
+
+50→10  [full]  Sensitivity Analysis: Event Timing Only
+  Naive MAE: 1.039990   MSE: 2.482604
+  Model MAE: 0.453581   MSE: 0.678038
+  rMAE: 0.4361   rMSE: 0.2731
+  Checkpoint: runs/v25/Event Timing Only_50to10_full/checkpoints
+
