@@ -124,7 +124,7 @@ def calculate_relative_metrics(model_mae, model_mse, naive_mae, naive_mse):
 
 #  TRAINING FUNCTION 
 
-def train_equitybert_single_config(config, run_dir, data_scenario="full", ablation_name="default"):
+def train_equitybert_single_config(config, run_dir, data_scenario="full", variant_name="default"):
     """
     Train EquityBERT for a single configuration (lookback, forecast)
 
@@ -132,7 +132,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
         config        : dict with lookback, forecast, and other hyperparameters
         run_dir       : versioned output directory
         data_scenario : "full" (100% training data) or "scarce" (10%)
-        ablation_name : label for this ablation variant
+        variant_name  : label for this sensitivity analysis variant
 
     Returns:
         dict with all metrics and paths
@@ -141,7 +141,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
     print("\n" + "=" * 80)
     print(f"Training Configuration: {config['lookback']}→{config['forecast']}")
     print(f"Data Scenario: {data_scenario.upper()}")
-    print(f"Sensitivity Analysis: {ablation_name}")
+    print(f"Sensitivity Analysis: {variant_name}")
     print("=" * 80)
 
     fine_tuning_pct = None if data_scenario == "full" else 0.1
@@ -235,7 +235,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
  
     
     use_amp = torch.cuda.is_available()
-    scenario_name = f"{ablation_name}_{config['lookback']}to{config['forecast']}_{data_scenario}"
+    scenario_name = f"{variant_name}_{config['lookback']}to{config['forecast']}_{data_scenario}"
     checkpoint_dir = os.path.join(
         run_dir, scenario_name, "checkpoints"
     )
@@ -360,7 +360,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", ablati
         "rmae": rmae,
         "rmse": rmse,
         "checkpoint_dir": checkpoint_dir,
-        "ablation_name": ablation_name,
+        "variant_name": variant_name,
         "train_mae_history": train_mae,
         "val_mae_history": val_mae,
         "train_mse_history": train_mse,
@@ -434,7 +434,7 @@ def main():
         {"lookback": 50, "forecast": 10},   # Medium-term
         #{"lookback": 60, "forecast": 20},   # Long-term
     ]
-    ablation_configs = [
+    sensitivity_configs = [
         {
             "name": "No Events",
             "use_events": False,
@@ -486,7 +486,7 @@ def main():
             axes = axes.reshape(1, -1)
  
         for i, r in enumerate(all_results):
-            label = f"{r['ablation_name']} {r['config']['lookback']}→{r['config']['forecast']}"
+            label = f"{r['variant_name']} {r['config']['lookback']}→{r['config']['forecast']}"
             date_subtitle = (
                 f"Train: {r['train_range']}  |  Val: {r['val_range']}  |  Test: {r['test_range']}"
             )
@@ -525,7 +525,7 @@ def main():
         f.write("=" * 60 + "\n\n")
         for r in all_results:
             f.write(f"{r['config']['lookback']}→{r['config']['forecast']}  "
-                    f"[{r['data_scenario']}]  Sensitivity Analysis: {r['ablation_name']}\n")
+                    f"[{r['data_scenario']}]  Sensitivity Analysis: {r['variant_name']}\n")
             f.write(f"  Naive MAE: {r['naive_mae']:.6f}   MSE: {r['naive_mse']:.6f}\n")
             f.write(f"  Model MAE: {r['model_mae']:.6f}   MSE: {r['model_mse']:.6f}\n")
             f.write(f"  rMAE: {r['rmae']:.4f}   rMSE: {r['rmse']:.4f}\n")
@@ -535,7 +535,7 @@ def main():
     for r in all_results:
         csv_rows.append({
             "horizon": f"{r['config']['lookback']}→{r['config']['forecast']}",
-            "ablation": r["ablation_name"],
+            "variant": r["variant_name"],
             "data_scenario": r["data_scenario"],
             "naive_mae": r["naive_mae"],
             "naive_mse": r["naive_mse"],
