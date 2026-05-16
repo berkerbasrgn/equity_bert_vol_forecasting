@@ -130,25 +130,18 @@ def extract_predictions(model, dataset, device, pred_len):
     preds_orig = inv(preds)
     trues_orig = inv(trues)
  
-    # Attach datetimes
+    # Attach datetimes — flat indexing: sample i has prediction starting at row i + seq_len
     rows = []
-    sample_idx = 0
-    for x_tensor, y_tensor in DataLoader(dataset, batch_size=1, shuffle=False):
-        week_idx = dataset._find_week_index(sample_idx)
-        day_idx  = sample_idx - (dataset.cumsum[week_idx - 1] if week_idx > 0 else 0)
-        r_begin  = day_idx + dataset.seq_len
- 
-        raw_week = dataset.raw_data[week_idx]
- 
+    for sample_idx in range(len(preds_orig)):
+        r_begin = sample_idx + dataset.seq_len
         for step in range(pred_len):
-            dt_step = raw_week["Datetime"].iloc[r_begin + step]
+            dt_step = dataset.raw_data["Datetime"].iloc[r_begin + step]
             rows.append({
                 "Datetime":      dt_step,
                 "Horizon_step":  step + 1,
                 "Actual_r":      trues_orig[sample_idx, step],
                 "Predicted_r":   preds_orig[sample_idx, step],
             })
-        sample_idx += 1
  
     df = pd.DataFrame(rows)
     df["AE"] = np.abs(df["Actual_r"] - df["Predicted_r"])

@@ -252,6 +252,7 @@ def train_equitybert_single_config(config, run_dir, data_scenario="full", varian
         patience=config["patience"],
         verbose=True,
         num_workers=2,  # Use 2 workers for data loading (adjust based on my CPU)
+        weight_decay=config("weight_decay", 1e-3),
     )
 
     train_mae, val_mae, train_mse, val_mse = trainer.train(
@@ -418,7 +419,9 @@ def main():
         "max_epochs": 200,
         "lr": 1e-4,
         "patience": 10,
-        "features": "MS",           # Multivariate to univariate
+        "features": "MS",
+        "weight_decay": 1e-3,                 
+           # Multivariate to univariate
         # "use_technical": True,
         # "use_events": False,
         # "use_event_type": False,
@@ -431,7 +434,7 @@ def main():
     # Horizons to test (matching paper Table 2 and Table 3)
     horizons = [
         {"lookback": 24, "forecast": 5},    # Short-term
-        {"lookback": 50, "forecast": 10},   # Medium-term
+       # {"lookback": 50, "forecast": 10},   # Medium-term
         #{"lookback": 60, "forecast": 20},   # Long-term
     ]
     sensitivity_configs = [
@@ -441,18 +444,18 @@ def main():
             "use_event_type": False,
             "use_event_impact": False,
         },
-        {
-            "name": "Event Type Only",
-            "use_events": True,
-            "use_event_type": True,
-            "use_event_impact": False,
-        },
-        {
-            "name": "Event Timing Only",
-            "use_events": True,
-            "use_event_type": False,
-            "use_event_impact": False,
-        }
+        # {
+        #     "name": "Event Type Only",
+        #     "use_events": True,
+        #     "use_event_type": True,
+        #     "use_event_impact": False,
+        # },
+        # {
+        #     "name": "Event Timing Only",
+        #     "use_events": True,
+        #     "use_event_type": False,
+        #     "use_event_impact": False,
+        # }
     ]
 
 

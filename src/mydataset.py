@@ -185,6 +185,10 @@ class Dataset_SP500_1H(Dataset):
         - Minimum week-row filter is 60 (vs 230 for 30-minute FX data)
         - Lagged volatility features use row-shifts of 1h, 2h, 4h, 8h, 24h
 
+    Each __getitem__ sample uses a flat sliding window over the split's
+    contiguous row array — sequences can span week boundaries, which is
+    correct for near-continuous ES futures data.
+
     Each __getitem__ sample (use_explainable=True):
         ((x, tokens), y)
         x      : (num_series, seq_len)  float32 — scaled numerical features
@@ -298,8 +302,8 @@ class Dataset_SP500_1H(Dataset):
     # ------------------------------------------------------------------
     def __read_data__(self):
         """
-        Loads and preprocesses the processed ES.FUT Parquet into per-week
-        feature tensors ready for model consumption.
+        Loads and preprocesses the processed ES.FUT Parquet into a contiguous
+        feature array ready for sliding-window sampling.
 
         Processing pipeline:
             1. Load processed Parquet (title-case columns, one row/timestamp)
@@ -307,28 +311,20 @@ class Dataset_SP500_1H(Dataset):
             3. Optionally restrict to regular trading hours (mode='trading')
             4. If use_events: compute event-proximity features via merge_asof
             5. If use_explainable: compute session labels via numpy.select
-            6. Group by ISO week; skip incomplete weeks (< 60 bars)
-            7. Per-week: compute target (r), log-return, log-volume,
-               Bollinger Bands, momentum, acceleration, EMA, RSI, lagged r
-            8. Drop NaN warm-up rows; skip if < seq_len + pred_len remain
-            9. Assemble feature matrix (target 'r' always last column)
-           10. Chronological 70/15/15 train-val-test split by week count
-           11. Fit StandardScaler on training weeks; transform all splits
-           12. Store per-week arrays in self.data and self.raw_data
-
-        Key differences from Dataset_Rates_30M.__read_data__:
-            - Input is a pre-processed Parquet (not raw CSV)
-            - MIN_WEEK_ROWS = 60 (vs 230 for 30-minute FX data)
-            - Technical window T = 20h (vs T = 12 × 30min in Vola-BERT)
-            - Event proximity via two merge_asof passes (forward + backward)
-            - Session labels via numpy.select (10-50× faster than .apply())
-            - Lagged features: row-shifts of 1h, 2h, 4h, 8h, 24h
+            6. Compute target (r), log-return, log-volume, Bollinger Bands,
+               momentum, acceleration, EMA, RSI, and lagged r on the FULL
+               dataset — rolling windows carry across week boundaries so no
+               Monday/Tuesday rows are lost to per-week warmup dropout
+            7. Drop only the initial NaN warmup rows at the start of the series
+            8. Assemble feature matrix (target 'r' always last column)
+            9. Chronological 70/15/15 train-val-test split by row count,
+               producing contiguous splits with no calendar gaps
+           10. Fit StandardScaler on training rows; transform all splits
+           11. Store split slice in self.data (ndarray) and self.raw_data (DataFrame)
         """
         self.scaler = StandardScaler()
 
-        # ---- Load and parse ----------------------------------------
-        # preprocess_data.py has already: reset index, renamed columns to
-        # title-case, selected most-liquid contract, filtered bad bars.
+        # ---- 1. Load and parse -----------------------------------------------
         df_raw = pd.read_parquet(self.data_path)
         df_raw["Datetime"] = pd.to_datetime(df_raw["Datetime"], utc=True)
         if df_raw["Datetime"].dt.tz is None:
@@ -344,15 +340,11 @@ class Dataset_SP500_1H(Dataset):
             df_raw = df_raw[
                 (df_raw["Datetime"].dt.hour >= 9) &
                 (df_raw["Datetime"].dt.hour < 16)
-            ]
+            ].reset_index(drop=True)
 
         # ---- 3. Event lookup (forward + backward merge_asof) -----------------
         # Forward merge: next upcoming event → hours_to_event
         # Backward merge: most recent past event → hours_since_event
-        #
-        # The original code used only a forward merge for hours_since_event,
-        # which produced all-zero values (bar_time − future_event ≤ 0, clipped
-        # to 0).  The backward merge fixes this.
         if self.use_events:
             events_sorted = (
                 self.events_df
@@ -360,10 +352,9 @@ class Dataset_SP500_1H(Dataset):
                 .reset_index(drop=True)
                 [["datetime", "event_type", "impact"]]
             )
-            df_raw = df_raw.sort_values("Datetime")
 
             merged_fwd = pd.merge_asof(
-                df_raw[["Datetime"]],
+                df_raw[["Datetime"]].reset_index(drop=True),
                 events_sorted.rename(columns={"datetime": "next_event_dt"}),
                 left_on="Datetime",
                 right_on="next_event_dt",
@@ -371,33 +362,33 @@ class Dataset_SP500_1H(Dataset):
             )
 
             merged_bwd = pd.merge_asof(
-                df_raw[["Datetime"]],
+                df_raw[["Datetime"]].reset_index(drop=True),
                 events_sorted.rename(columns={"datetime": "prev_event_dt"}),
                 left_on="Datetime",
                 right_on="prev_event_dt",
                 direction="backward",
             )
 
+            df_raw = df_raw.reset_index(drop=True)
             df_raw["hours_to_event"] = (
-                (merged_fwd["next_event_dt"] - df_raw["Datetime"])
-                .dt.total_seconds().div(3600.0)
-                .clip(upper=999.0).fillna(999.0)
+                (merged_fwd["next_event_dt"].values - df_raw["Datetime"].values)
+                / np.timedelta64(1, "h")
+            )
+            df_raw["hours_to_event"] = df_raw["hours_to_event"].clip(upper=999.0).fillna(999.0)
+
+            df_raw["hours_since_event"] = (
+                (df_raw["Datetime"].values - merged_bwd["prev_event_dt"].values)
+                / np.timedelta64(1, "h")
             )
             df_raw["hours_since_event"] = (
-                (df_raw["Datetime"] - merged_bwd["prev_event_dt"])
-                .dt.total_seconds().div(3600.0)
-                .clip(lower=0, upper=48).fillna(999.0)
+                df_raw["hours_since_event"].clip(lower=0, upper=48).fillna(999.0)
             )
             df_raw["is_event_recent"] = (df_raw["hours_since_event"] <= 5).astype(int)
             df_raw["is_event"]        = merged_fwd["next_event_dt"].notna().astype(int)
             df_raw["is_event_window"] = (df_raw["hours_to_event"].abs() <= 3).astype(int)
-            df_raw["time_to_event"]   = (
-                (merged_fwd["next_event_dt"] - df_raw["Datetime"])
-                .dt.total_seconds().div(3600.0)
-                .clip(-12, 12).fillna(999.0)
-            )
-            df_raw["event_type_raw"]   = merged_fwd["event_type"].fillna("NONE").str.upper()
-            df_raw["event_impact_raw"] = merged_fwd["impact"].fillna("NONE").str.upper()
+            df_raw["time_to_event"]   = df_raw["hours_to_event"].clip(-12, 12).fillna(999.0)
+            df_raw["event_type_raw"]   = merged_fwd["event_type"].fillna("NONE").str.upper().values
+            df_raw["event_impact_raw"] = merged_fwd["impact"].fillna("NONE").str.upper().values
 
         # ---- 4. Session labels (vectorised) ----------------------------------
         if self.use_explainable:
@@ -417,141 +408,95 @@ class Dataset_SP500_1H(Dataset):
             ]
             df_raw["market_session"] = np.select(conditions, choices, default="overnight")
 
-        # ---- 5. ISO-week grouping --------------------------------------------
-        df_raw["iso_year"] = df_raw["Datetime"].dt.isocalendar().year.astype(int)
-        df_raw["iso_week"] = df_raw["Datetime"].dt.isocalendar().week.astype(int)
-        df_raw["week_key"] = (
-            df_raw["iso_year"].astype(str) + "-W"
-            + df_raw["iso_week"].astype(str).str.zfill(2)
-        )
+        # ---- 5. Compute ALL features on the full dataset ---------------------
+        # Rolling windows carry across week boundaries — no per-week warmup
+        # reset, so Monday/Tuesday rows are no longer lost to NaN dropout.
+        # Only the initial warmup period at the very start of the dataset is
+        # dropped (rows where acceleration or prev_r-24h is still NaN).
+        df_raw = df_raw.reset_index(drop=True)
 
-        MIN_WEEK_ROWS = 60
+        df_raw["r"]          = np.log(df_raw["High"] / df_raw["Low"])
+        df_raw["log_return"] = np.log(df_raw["Close"] / df_raw["Close"].shift(1))
+        df_raw["log_volume"] = np.log1p(df_raw["Volume"])
 
-        df_data     = []
-        raw_df_data = []
+        T = 20
+        D = 2
+        df_raw["middle_band"] = df_raw["log_return"].rolling(window=T).mean()
+        rolling_std           = df_raw["log_return"].rolling(window=T).std()
+        df_raw["upper_band"]  = df_raw["middle_band"] + D * rolling_std
+        df_raw["lower_band"]  = df_raw["middle_band"] - D * rolling_std
 
-        for week_key, week_data in df_raw.groupby("week_key"):
-            if len(week_data) < MIN_WEEK_ROWS:
-                continue
+        df_raw["momentum"]     = df_raw["log_return"] - df_raw["log_return"].shift(T)
+        df_raw["acceleration"] = df_raw["momentum"]   - df_raw["momentum"].shift(T)
 
-            week_data = week_data.copy().reset_index(drop=True)
+        df_raw["ema"] = df_raw["log_return"].ewm(span=T, adjust=False).mean()
+        df_raw["rsi"] = calculate_rsi(df_raw["log_return"], period=14)
 
-            # Target: log high-low range (Parkinson volatility estimator)
-            week_data["r"] = np.log(week_data["High"] / week_data["Low"])
+        for lag in [1, 2, 4, 8, 24]:
+            df_raw[f"prev_r-{lag}h"] = df_raw["r"].shift(lag)
 
-            # Log return and log volume
-            week_data["log_return"] = np.log(
-                week_data["Close"] / week_data["Close"].shift(1)
-            )
-            week_data["log_volume"] = np.log1p(week_data["Volume"])
+        # Drop only the initial NaN warmup (first ~40 rows of the full series)
+        df_raw = df_raw.dropna().reset_index(drop=True)
 
-            # Technical indicators (window T=20h for hourly data)
-            T = 20
-            D = 2
-            week_data["middle_band"] = week_data["log_return"].rolling(window=T).mean()
-            rolling_std              = week_data["log_return"].rolling(window=T).std()
-            week_data["upper_band"]  = week_data["middle_band"] + D * rolling_std
-            week_data["lower_band"]  = week_data["middle_band"] - D * rolling_std
+        # ---- 6. Assemble feature matrix (target 'r' always last) -------------
+        used_features = []
+        if self.use_technical:
+            used_features += self.TECH_INDICATORS + ["log_return"]
+        if self.use_events:
+            used_features += [
+                "hours_to_event", "hours_since_event", "is_event_recent",
+                "is_event", "is_event_window", "time_to_event",
+            ]
+        if self.use_interday:
+            used_features += self.INTERDAY_VOLAS
+        used_features += ["log_volume"]
+        used_features += ["r"]
 
-            week_data["momentum"]     = week_data["log_return"] - week_data["log_return"].shift(T)
-            week_data["acceleration"] = week_data["momentum"] - week_data["momentum"].shift(T)
+        df_features = df_raw[used_features]
+        N = len(df_features)
 
-            week_data["ema"] = week_data["log_return"].ewm(span=T, adjust=False).mean()
-            week_data["rsi"] = calculate_rsi(week_data["log_return"], period=14)
-
-            # Lagged log-range features
-            for lag in [1, 2, 4, 8, 24]:
-                week_data[f"prev_r-{lag}h"] = week_data["r"].shift(lag)
-
-            # Drop NaN warm-up rows
-            week_data = week_data.dropna().reset_index(drop=True)
-            if len(week_data) < (self.seq_len + self.pred_len):
-                continue
-
-            # Assemble feature matrix (target 'r' always last)
-            used_features = []
-            if self.use_technical:
-                used_features += self.TECH_INDICATORS + ["log_return"]
-            if self.use_events:
-                used_features += [
-                    "hours_to_event", "hours_since_event", "is_event_recent",
-                    "is_event", "is_event_window", "time_to_event",
-                ]
-            if self.use_interday:
-                used_features += self.INTERDAY_VOLAS
-            used_features += ["log_volume"]
-            used_features += ["r"]
-
-            raw_df_data.append(week_data)
-            df_data.append(week_data[used_features])
-
-        # ---- 6. Temporal train / val / test split ----------------------------
-        # 70 / 15 / 15 by week count, strictly chronological.
+        # ---- 7. Temporal 70/15/15 split — by row count, no calendar gaps ----
         train_start = 0
         if self.fine_tuning_pct is not None and self.fine_tuning_pct < 1.0:
             train_start = int(
-                0.7 * (1 - self.fine_tuning_pct - 0.001) * len(df_data)
+                0.70 * (1 - self.fine_tuning_pct - 0.001) * N
             )
 
-        val_start  = int(0.70 * len(df_data))
-        test_start = int(0.85 * len(df_data))
-        borders    = [train_start, val_start, test_start, len(df_data)]
+        val_start  = int(0.70 * N)
+        test_start = int(0.85 * N)
+        borders    = [train_start, val_start, test_start, N]
 
-        # ---- 7. Fit scaler on training weeks only ----------------------------
+        # ---- 8. Fit scaler on training rows only ----------------------------
         if self.scale:
-            train_frames = [df_data[i] for i in range(train_start, val_start)]
-            if len(train_frames) == 0:
+            train_values = df_features.iloc[train_start:val_start].values
+            if len(train_values) == 0:
                 raise ValueError(
                     "No training data available for scaling. "
                     "Check fine_tuning_pct or the date range of data_path."
                 )
-            train_concat = pd.concat(train_frames).values
-            self.scaler.fit(train_concat)
+            self.scaler.fit(train_values)
 
-        # ---- 8. Store split-specific weeks -----------------------------------
+        # ---- 9. Select this split's contiguous slice ------------------------
         lo, hi = borders[self.set_type], borders[self.set_type + 1]
 
-        self.data     = []
-        self.raw_data = []  # always populated so start_date/end_date work
+        split_values = df_features.iloc[lo:hi].values
+        if self.scale:
+            split_values = self.scaler.transform(split_values)
 
-        for i in range(lo, hi):
-            week_values = df_data[i].values
-            if self.scale:
-                week_values = self.scaler.transform(week_values)
-            self.data.append(week_values)
-            self.raw_data.append(raw_df_data[i])
+        self.data     = split_values                              # (N_split, num_features)
+        self.raw_data = df_raw.iloc[lo:hi].reset_index(drop=True)  # for token lookups
 
-        # ---- 9. Index helpers ------------------------------------------------
-        self.week_lens = [len(w) for w in self.data]
-        self.data_len  = [
-            max(0, wl - self.seq_len - self.pred_len + 1)
-            for wl in self.week_lens
-        ]
-        self.cumsum  = np.cumsum(self.data_len)
-        self.tot_len = sum(self.data_len)
-
-        self.num_series = df_data[0].shape[1] - 1 if df_data else 0
+        self.num_series = df_features.shape[1] - 1
+        self.tot_len    = max(0, len(self.data) - self.seq_len - self.pred_len + 1)
 
     # ------------------------------------------------------------------
     def __len__(self):
         return self.tot_len
 
     # ------------------------------------------------------------------
-    def _find_week_index(self, index):
-        """Binary search for the week containing the given flat sample index."""
-        l, r = 0, len(self.cumsum) - 1
-        while l <= r:
-            mid = (l + r) // 2
-            if index >= self.cumsum[mid]:
-                l = mid + 1
-            else:
-                r = mid - 1
-        return l
-
-    # ------------------------------------------------------------------
     def __getitem__(self, index):
         """
-        Returns one sample.
+        Returns one sample from the contiguous sliding window.
 
         When use_explainable=True  → ((x, tokens), y)
         When use_explainable=False → (x, y)
@@ -562,22 +507,19 @@ class Dataset_SP500_1H(Dataset):
         Token lookup uses the first row of the prediction window (r_begin) —
         the regime the model is forecasting INTO.
         """
-        week_idx = self._find_week_index(index)
-        day_idx  = index - (self.cumsum[week_idx - 1] if week_idx > 0 else 0)
-
-        s_begin = day_idx
+        s_begin = index
         s_end   = s_begin + self.seq_len
         r_begin = s_end
         r_end   = r_begin + self.pred_len
 
-        seq_x = self.data[week_idx][s_begin:s_end, :-1]
-        seq_y = self.data[week_idx][r_begin:r_end, -1:]
+        seq_x = self.data[s_begin:s_end, :-1]
+        seq_y = self.data[r_begin:r_end, -1:]
 
         x = torch.tensor(seq_x, dtype=torch.float).transpose(1, 0)
         y = torch.tensor(seq_y, dtype=torch.float).transpose(1, 0)
 
         if self.use_explainable:
-            next_row = self.raw_data[week_idx].iloc[r_begin]
+            next_row = self.raw_data.iloc[r_begin]
 
             session_str = next_row.get("market_session", "overnight")
             session_tok = torch.tensor(
@@ -619,13 +561,13 @@ class Dataset_SP500_1H(Dataset):
     @property
     def start_date(self):
         """Earliest datetime in this split."""
-        if self.raw_data:
-            return self.raw_data[0]["Datetime"].iloc[0]
+        if len(self.raw_data) > 0:
+            return self.raw_data["Datetime"].iloc[0]
         return None
 
     @property
     def end_date(self):
         """Latest datetime in this split."""
-        if self.raw_data:
-            return self.raw_data[-1]["Datetime"].iloc[-1]
+        if len(self.raw_data) > 0:
+            return self.raw_data["Datetime"].iloc[-1]
         return None
