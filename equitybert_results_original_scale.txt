@@ -1,0 +1,51 @@
+EquityBERT — Original Scale Results (after inverse transform)
+=================================================================
+
+24→5  No Events_24to5_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001518   MSE: 0.000008
+  Model MAE   : 0.001238   MSE: 0.000006
+  rMAE        : 0.8152
+  rMSE        : 0.7938
+  vs Naive    : -18.5%
+
+24→5  Event Type Only_24to5_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001518   MSE: 0.000008
+  Model MAE   : 0.001227   MSE: 0.000006
+  rMAE        : 0.8083
+  rMSE        : 0.7851
+  vs Naive    : -19.2%
+
+24→5  Event Timing Only_24to5_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001518   MSE: 0.000008
+  Model MAE   : 0.001227   MSE: 0.000006
+  rMAE        : 0.8078
+  rMSE        : 0.7835
+  vs Naive    : -19.2%
+
+50→10  No Events_50to10_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001762   MSE: 0.000010
+  Model MAE   : 0.001344   MSE: 0.000007
+  rMAE        : 0.7632
+  rMSE        : 0.6614
+  vs Naive    : -23.7%
+
+50→10  Event Type Only_50to10_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001762   MSE: 0.000010
+  Model MAE   : 0.001319   MSE: 0.000007
+  rMAE        : 0.7485
+  rMSE        : 0.6565
+  vs Naive    : -25.2%
+
+50→10  Event Timing Only_50to10_full
+  Test period : 2025-02-27 01:00:00-05:00 → 2026-03-31 19:00:00-04:00
+  Naive MAE   : 0.001762   MSE: 0.000010
+  Model MAE   : 0.001368   MSE: 0.000007
+  rMAE        : 0.7764
+  rMSE        : 0.6678
+  vs Naive    : -22.4%
+
