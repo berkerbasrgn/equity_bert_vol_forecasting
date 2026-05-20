@@ -1,235 +1,498 @@
-## EquityBERT: S&P 500 Volatility Forecasting
+# EquityBERT: S&P 500 Volatility Forecasting
 
-A PyTorch-based volatility forecasting framework for E-mini S&P 500 futures (ES.FUT) at hourly frequency, adapted from the original Vola-BERT model for FX rate forecasting.
+A PyTorch framework for forecasting log-range volatility of E-mini S&P 500 futures (ES.FUT) at hourly frequency, adapted from the Vola-BERT architecture (Nguyen et al., ICAIF 2025).
+
+---
+
+## Key Results
+
+All metrics are on the **original log-range scale** (`r = ln(H/L)`), test period **2025-03-01 → 2026-03-31**.
+
+### EquityBERT vs LSTM — Test Set Performance
+
+| Horizon | Model | MAE | MSE | MAE vs LSTM | DM p-value |
+|---------|-------|-----|-----|-------------|------------|
+| 24→5 h | LSTM Baseline | 0.001601 | 6.0×10⁻⁶ | — | — |
+| 24→5 h | EquityBERT (No Events) | 0.001195 | 6.0×10⁻⁶ | **−25.4%** | <0.001 *** |
+| 24→5 h | EquityBERT (Event Type) | 0.001195 | 6.0×10⁻⁶ | **−25.4%** | <0.001 *** |
+| 24→5 h | EquityBERT (Event Timing) | 0.001190 | 6.0×10⁻⁶ | **−25.7%** | <0.001 *** |
+| 50→10 h | LSTM Baseline | 0.001560 | 6.0×10⁻⁶ | — | — |
+| 50→10 h | EquityBERT (No Events) | 0.001192 | 6.0×10⁻⁶ | **−23.6%** | <0.001 *** |
+| 50→10 h | EquityBERT (Event Type) | 0.001188 | 6.0×10⁻⁶ | **−23.8%** | <0.001 *** |
+| 50→10 h | EquityBERT (Event Timing) | 0.001177 | 6.0×10⁻⁶ | **−24.6%** | <0.001 *** |
+
+Significance codes: `***` p<0.001 · `**` p<0.01 · `*` p<0.05 · `n.s.` p≥0.05  
+Diebold-Mariano test with Newey-West long-run variance (lags = pred\_len − 1).
+
+### EquityBERT vs Naive Persistence Baseline (original scale)
+
+| Horizon | Variant | Naive MAE | Model MAE | rMAE | rMSE | Improvement |
+|---------|---------|-----------|-----------|------|------|-------------|
+| 24→5 h | No Events | 0.001518 | 0.001238 | 0.815 | 0.794 | −18.5% |
+| 24→5 h | Event Type Only | 0.001518 | 0.001227 | 0.808 | 0.785 | −19.2% |
+| 24→5 h | Event Timing Only | 0.001518 | 0.001227 | 0.808 | 0.784 | −19.2% |
+| 50→10 h | No Events | 0.001762 | 0.001344 | 0.763 | 0.661 | −23.7% |
+| 50→10 h | Event Type Only | 0.001762 | 0.001319 | 0.749 | 0.657 | **−25.2%** |
+| 50→10 h | Event Timing Only | 0.001762 | 0.001368 | 0.776 | 0.668 | −22.4% |
+
+rMAE < 1.0 means the model beats the naive last-value persistence baseline. rMAE and rMSE follow the Vola-BERT paper (Nguyen et al., 2025) evaluation protocol.
+
+### Statistical Significance Summary
+
+| Horizon | Variant | DM stat (MAE) | DM p (MAE) | DM stat (MSE) | DM p (MSE) |
+|---------|---------|---------------|------------|---------------|------------|
+| 24→5 | No Events | +30.43 | <0.001 *** | −0.47 | n.s. |
+| 24→5 | Event Type Only | +30.00 | <0.001 *** | −0.57 | n.s. |
+| 24→5 | Event Timing Only | +31.02 | <0.001 *** | +0.16 | n.s. |
+| 50→10 | No Events | +32.52 | <0.001 *** | −1.13 | n.s. |
+| 50→10 | Event Type Only | +32.68 | <0.001 *** | −1.08 | n.s. |
+| 50→10 | Event Timing Only | +33.95 | <0.001 *** | −0.85 | n.s. |
+
+**Conclusion**: EquityBERT significantly outperforms the LSTM on MAE across all configurations and horizons (DM p<0.001). MSE differences are not statistically significant, indicating both models produce similarly-sized large errors during extreme market moves. Event semantic tokens (Event Type, Event Timing) provide marginal but consistent MAE gains over the No Events baseline.
+
+---
 
 ## Overview
 
-This project implements two complementary deep learning architectures for forecasting log-range volatility of ES.FUT hourly bars:
+```
+Raw ES futures data (Databento)
+          │
+          ▼
+  src/preprocess_data.py      ← OHLCV cleaning, contract roll, quality filters
+          │
+          ▼
+  data/processed/ES_1h.parquet
+          │
+          ▼
+  src/mydataset.py            ← Feature engineering, StandardScaler, token generation
+          │   (technical indicators, lagged vol, session tokens, event tokens)
+          │
+     ┌────┴────┐
+     ▼         ▼
+train_sp500_hourly.py    train_lstm.py
+(EquityBERT)             (LSTM Baseline)
+     │                        │
+     ▼                        ▼
+runs/equitybert/v*/      runs/lstm_baseline/v*/
+     │                        │
+     └─────────┬──────────────┘
+               ▼
+    evaluate_inverse.py      ← EquityBERT: original-scale metrics
+    evaluate_lstm.py         ← LSTM: per-step Excel export, plots
+    evaluation/evaluate_shap.py  ← SHAP feature importance
+    compare_significance.py  ← Diebold-Mariano + paired t-test
+               │
+               ▼
+    runs/significance_tests/
+```
 
-- **EquityBERT**: Transformer-based model with semantic token embeddings for market regime awareness
-- **LSTM Baseline**: Recurrent neural network baseline for comparison
+Two complementary architectures are trained on the same data and evaluated on the same test split:
 
+- **EquityBERT** — BERT backbone with frozen attention weights, semantic token embeddings for market session and macro event awareness, RevIN instance normalisation.
+- **LSTM Baseline** — Stacked unidirectional LSTM with technical and interday features; no event awareness.
 
-The model ingests:
-- Technical indicators (Bollinger Bands, RSI, EMA, momentum)
-- Market session tokens (overnight, pre-market, regular, after-hours)
-- US macro event signals (FOMC, CPI, PPI, NFP)
-- Lagged volatility features (1h, 2h, 4h, 8h, 24h)
+**Target variable**: Log-range volatility `r_t = ln(H_t / L_t)` (Parkinson, 1980), computed from hourly ES.FUT OHLCV bars.
 
-**Target variable**: Log-range volatility `r_t = ln(H_t / L_t)`, the Parkinson (1980) volatility estimator
+---
 
 ## Project Structure
 
 ```
 vola-bert/
 ├── data/
-│   ├── raw/                          # Raw Databento Parquet (output of download_databento.py)
-│   └── processed/
-│       └── ES_1h.parquet             # Preprocessed 1-hour OHLCV bars
+│   ├── raw/
+│   │   ├── ES_1h.parquet          # Raw Databento hourly bars
+│   │   └── ES_1min.parquet        # Raw 1-minute bars (optional)
+│   ├── processed/
+│   │   └── ES_1h.parquet          # Cleaned hourly OHLCV for model input
+│   └── NEW_macro_events.csv       # US macro event calendar (FRED + FOMC)
+│
 ├── src/
-│   ├── __init__.py
-│   ├── model_bert.py                 # EquityBERT (BERT-based) architecture
-│   ├── model_lstm.py                 # LSTM baseline model
-│   ├── mydataset.py                  # PyTorch Dataset class with token generation
-│   ├── preprocess_data.py            # Raw → processed Parquet pipeline
-│   ├── trainer.py                    # Training and evaluation loop (EquityBERT)
-│   ├── utils.py                      # StandardScaler, EarlyStopping
-│   ├── loss.py                       # MAE / MSE loss functions
-│   ├── plot_utils.py                 # Visualisation helpers
-│   ├── download_databento.py         # Databento data download script
-│   ├── macro_event_builder.py        # US macro event calendar builder
-│   └── macroeventcoder.py            # Event type / impact encoder
-├── train_sp500_hourly_RAW.py         # EquityBERT training entry point
-├── train_lstm.py                     # LSTM baseline training entry point
-├── evaluate_lstm.py                  # LSTM inference, Excel export, and plots
-├── README.md                         # This file
-└── req.txt                           # Python dependencies
+│   ├── model_bert.py              # EquityBERT architecture (BERT + PEFT + RevIN)
+│   ├── model_lstm.py              # LSTM baseline
+│   ├── mydataset.py               # Dataset_SP500_1H with token generation
+│   ├── trainer.py                 # Training loop, early stopping, checkpointing
+│   ├── utils.py                   # StandardScaler, EarlyStopping
+│   ├── loss.py                    # MAE / MSE loss functions
+│   ├── preprocess_data.py         # Raw → processed Parquet pipeline
+│   ├── macro_event_builder.py     # US macro calendar builder (FRED API)
+│   └── plot_utils.py              # Visualisation helpers
+│
+├── evaluation/
+│   ├── dm_test.py                 # Standalone Diebold-Mariano implementation
+│   ├── evaluate_lstm.py           # LSTM evaluation (per-step Excel + SHAP + plots)
+│   ├── evaluate_shap.py           # SHAP feature importance for LSTM
+│   └── main_dm_test_run.py        # CLI entry point for DM test
+│
+├── train_sp500_hourly.py          # EquityBERT training entry point
+├── train_lstm.py                  # LSTM baseline training entry point
+├── evaluate_lstm.py               # LSTM inference, Excel export, plots (root-level)
+├── evaluate_inverse.py            # EquityBERT post-hoc eval on original scale
+├── compare_significance.py        # Cross-model statistical significance tests
+│
+├── runs/
+│   ├── equitybert/
+│   │   └── v27/                   # Latest EquityBERT run (6 variants × 2 horizons)
+│   │       ├── No Events_24to5_full/checkpoints/
+│   │       ├── Event Type Only_24to5_full/checkpoints/
+│   │       ├── Event Timing Only_24to5_full/checkpoints/
+│   │       ├── No Events_50to10_full/checkpoints/
+│   │       ├── Event Type Only_50to10_full/checkpoints/
+│   │       ├── Event Timing Only_50to10_full/checkpoints/
+│   │       ├── equitybert_results_v25.csv
+│   │       └── all_loss_curves_v25.png
+│   ├── lstm_baseline/
+│   │   └── v2/                    # LSTM baseline run
+│   │       ├── best_model_24to5.pth
+│   │       ├── best_model_50to10.pth
+│   │       ├── lstm_predictions_24to5.xlsx   # Train/Val/Test sheets
+│   │       ├── lstm_predictions_50to10.xlsx
+│   │       └── lstm_results_v2.txt
+│   └── significance_tests/
+│       ├── significance_results.txt
+│       └── significance_results.csv
+│
+├── equitybert_results_original_scale.txt  # EquityBERT inverse-scale eval
+├── equitybert_results_original_scale.csv
+├── req.txt                        # Python dependencies
+└── pyproject.toml
 ```
 
-## Installation
+---
 
-### 1. Clone the Repository
+## Installation
 
 ```bash
 git clone <repository_url>
 cd vola-bert
-```
 
-### 2. Install Dependencies
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
-```bash
 pip install -r req.txt
 ```
 
 **Key dependencies**:
-- PyTorch (CPU/CUDA)
-- pandas, numpy
-- scikit-learn
-- Databento (for data download)
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| torch | ≥2.0 | Model training |
+| transformers | latest | BERT backbone (bert-base-uncased) |
+| pandas | ≥2.0 | Data handling |
+| numpy | ≥1.24 | Numerical ops |
+| scikit-learn | ≥1.3 | StandardScaler |
+| shap | ≥0.45 | Feature importance |
+| scipy | latest | Statistical tests (DM, t-test) |
+| pyarrow | ≥14.0 | Parquet I/O |
+| matplotlib | ≥3.7 | Plots |
+
+---
 
 ## Data Preparation
 
-### Prerequisites
+### Parquet Schema
 
-The project expects preprocessed data at `data/processed/ES_1h.parquet` with the following structure:
+`data/processed/ES_1h.parquet` must contain:
 
-| Column      | Type      | Description                          |
-|------------|-----------|--------------------------------------|
-| Datetime   | datetime  | Timezone-aware timestamp (ET)        |
-| Open       | float     | Opening price                        |
-| High       | float     | Session high                         |
-| Low        | float     | Session low                          |
-| Close      | float     | Closing price                        |
-| Volume     | int       | Trade volume or count                |
+| Column | Type | Description |
+|--------|------|-------------|
+| Datetime | datetime (tz-aware, ET) | Bar open timestamp |
+| Open | float | Opening price |
+| High | float | Session high |
+| Low | float | Session low |
+| Close | float | Closing price |
+| Volume | int | Trade volume |
 
-### Running Preprocessing
-
-Download raw data from Databento, then run preprocessing:
+### Preprocessing Pipeline
 
 ```bash
-python src/download_databento.py          # produces data/raw/ES_1h.parquet
-python src/preprocess_data.py             # produces data/processed/ES_1h.parquet
+# 1. Download raw hourly bars from Databento
+python src/download_databento.py          # → data/raw/ES_1h.parquet
+
+# 2. Clean and normalise
+python src/preprocess_data.py             # → data/processed/ES_1h.parquet
 ```
 
-**What preprocessing does**:
-1. Resets the `ts_event` DatetimeIndex to a `Datetime` column
-2. Removes calendar-spread instruments (symbols containing `-`)
-3. Renames lowercase OHLCV columns to title-case
-4. Keeps only the most liquid contract per timestamp (highest volume)
-5. Drops bars with `Low < 1000` or `High > 10000` (data errors / placeholder rows)
-6. Outputs cleaned Parquet to `data/processed/ES_1h.parquet`
+Preprocessing steps:
+1. Reset `ts_event` DatetimeIndex to `Datetime` column
+2. Remove calendar-spread instruments (symbols containing `-`)
+3. Rename lowercase OHLCV columns to title-case
+4. Keep only the most liquid contract per timestamp (highest volume)
+5. Drop bars with `Low < 1000` or `High > 10000` (data errors)
+6. Output cleaned Parquet
 
-Technical indicator computation and session labelling happen inside `Dataset_SP500_1H` at load time, not in preprocessing.
+Technical indicators, session tokens, and event features are computed inside `Dataset_SP500_1H` at load time.
+
+### Macro Event Calendar
+
+The event calendar (`data/NEW_macro_events.csv`) is built from FRED vintage dates and hardcoded FOMC release times:
+
+```bash
+# Requires FRED_API_KEY in .env
+python src/macro_event_builder.py         # → data/NEW_macro_events.csv
+```
+
+| Column | Values |
+|--------|--------|
+| datetime | timezone-aware ET timestamp |
+| event_type | CPI, PPI, NFP, FOMC |
+
+The calendar covers 2019-01-01 → 2026-03-31 with four event types at their standard release times (BLS releases at 08:30 ET; FOMC statements at 14:00 ET).
+
+---
 
 ## Training
 
-### Quick Start
-
-Train EquityBERT:
+### EquityBERT
 
 ```bash
-python train_sp500_hourly_RAW.py
+python train_sp500_hourly.py
 ```
 
-Train the LSTM baseline:
+Outputs a versioned run directory under `runs/equitybert/v{N}/` containing checkpoints, loss plots, and a results CSV.
+
+**Key hyperparameters** (edit `base_config` in `train_sp500_hourly.py`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lookback` | 24 | Input window length (hours) |
+| `forecast` | 5 | Prediction horizon (hours) |
+| `n_layer` | 4 | BERT encoder layers to use |
+| `batch_size` | 32 | Training batch size |
+| `max_epochs` | 200 | Maximum training epochs |
+| `lr` | 1e-4 | Learning rate |
+| `patience` | 10 | Early stopping patience |
+| `weight_decay` | 1e-3 | AdamW weight decay |
+
+**Sensitivity analysis variants** (controlled via `sensitivity_configs`):
+
+| Variant | `use_events` | `use_event_type` | Description |
+|---------|-------------|-----------------|-------------|
+| No Events | False | False | Market session tokens only |
+| Event Type Only | True | True | Session + event type tokens |
+| Event Timing Only | True | False | Session + event proximity only |
+
+**Forecast horizons**:
+
+| Label | Lookback | Forecast | Description |
+|-------|----------|----------|-------------|
+| Short-term | 24 h | 5 h | 1-day context → 5-hour ahead |
+| Medium-term | 50 h | 10 h | ~2-day context → 10-hour ahead |
+
+### LSTM Baseline
 
 ```bash
 python train_lstm.py
 ```
 
-### Configuration
-#
-Edit the `base_config` and `horizons` dicts at the bottom of `train_sp500_hourly_RAW.py`:
+Outputs checkpoints to `runs/lstm_baseline/v{N}/`.
 
-```python
-# Forecast horizon (lookback → forecast)
-horizons = [
-    {"lookback": 24, "forecast": 5},   # Short-term (default)
-    {"lookback": 50, "forecast": 10},  # Medium-term
-    {"lookback": 60, "forecast": 20},  # Long-term
-]
+**LSTM configuration**:
 
-# Feature toggles
-use_technical = True   # Bollinger Bands, RSI, EMA, momentum
-use_events = False     # US macro calendar proximity
-use_interday = True    # Lagged volatility (1h, 2h, 4h, 8h, 24h)
-use_explainable = False  # Semantic tokens (set True to enable EquityBERT tokens)
+| Parameter | Value |
+|-----------|-------|
+| hidden_size | 64 |
+| num_layers | 2 |
+| dropout | 0.2–0.4 |
+| batch_size | 128 |
+| lr | 3e-4 |
+| weight_decay | 5e-4 |
+| patience | 15 |
 
-# Market filter
-mode = "24h"           # "24h" (all hours) or "trading" (09:00-16:00 ET)
+### Data Split
+
+Both models use the same 70 / 15 / 15 weekly split on the full dataset:
+
+| Split | Period | Fraction |
+|-------|--------|----------|
+| Train | 2019-01-03 → 2024-01-21 | 70% |
+| Val | 2024-01-23 → 2025-02-23 | 15% |
+| Test | 2025-02-25 → 2026-03-31 | 15% |
+
+---
+
+## Evaluation Pipeline
+
+### 1. EquityBERT — Original-Scale Metrics
+
+Loads saved checkpoints and inverse-transforms predictions back to the raw `ln(H/L)` scale:
+
+```bash
+python evaluate_inverse.py
 ```
 
-### Dataset Parameters
+Outputs `equitybert_results_original_scale.txt` and `.csv` with naive MAE, model MAE, rMAE, and rMSE for each variant.
 
-The `Dataset_SP500_1H` class accepts:
+### 2. LSTM — Per-Step Excel Export and Plots
 
-| Parameter          | Type  | Default | Description                                    |
-|--------------------|-------|---------|------------------------------------------------|
-| `data_path`        | str   | –       | Path to `ES_1h.parquet`                        |
-| `events_df`        | DF    | None    | US macro event calendar (if `use_events=True`) |
-| `flag`             | str   | 'train' | 'train', 'val', or 'test'                      |
-| `size`             | tuple | (48,12) | (seq_len, pred_len); training scripts default to (24, 5) |
-| `scale`            | bool  | True    | Standardize features                           |
-| `use_technical`    | bool  | True    | Include technical indicators                   |
-| `use_events`       | bool  | False   | Include macro event features                   |
-| `use_interday`     | bool  | True    | Include lagged volatility                      |
-| `use_explainable`  | bool  | True    | Return semantic tokens                         |
-| `mode`             | str   | '24h'   | '24h' or 'trading'                             |
-| `use_event_type`   | bool  | False   | Enable event type tokens                       |
-| `use_event_impact` | bool  | False   | Enable event impact tokens                     |
+```bash
+python evaluate_lstm.py
+```
 
+Produces inside `runs/lstm_baseline/v{N}/`:
+- `lstm_predictions_{tag}.xlsx` — three sheets (Train / Val / Test) with columns `Datetime, Horizon_step, Actual_r, Predicted_r, AE, SE`
+- `lstm_vol_forecast_{tag}.png` — actual vs predicted time series
+- `lstm_scatter_{tag}.png` — scatter plot per split
 
+### 3. SHAP Feature Importance (LSTM)
+
+```bash
+python evaluation/evaluate_shap.py
+```
+
+Produces inside the LSTM run directory:
+- `shap_bar_{tag}.png` — ranked mean |SHAP| per feature
+- `shap_heatmap_{tag}.png` — feature × time-step importance heatmap
+- `shap_summary_{tag}.png` — beeswarm coloured by feature value
+
+### 4. Statistical Significance Testing
+
+```bash
+python compare_significance.py
+```
+
+For each EquityBERT variant and horizon, the script:
+1. Loads LSTM test predictions from the xlsx Test sheet (original scale)
+2. Runs EquityBERT inference and inverse-transforms to the same scale
+3. Aligns both on `(Datetime, Horizon_step)` via an inner join
+4. Runs Diebold-Mariano test (Newey-West, `h−1` lags) and paired t-test
+5. Saves `runs/significance_tests/significance_results.txt` and `.csv`
+
+```
+runs/significance_tests/
+├── significance_results.txt    # Full report with DM stats and p-values
+└── significance_results.csv    # Machine-readable summary
+```
+
+---
 
 ## Model Architectures
 
 ### EquityBERT
 
-**Input**:
-- Numerical features: `(batch_size, num_series, seq_len)`
-- Semantic tokens: dict of scalar `int64` tensors — `{"market_session": ..., "event_type": ..., "event_impact": ...}`
+Adapted from Vola-BERT (Nguyen et al., ICAIF 2025) for equity index volatility.
 
-**Architecture** (three-stage pipeline adapted from Vola-BERT / Nguyen et al., ICAIF 2025):
+```
+Input: (B, N, L)  — B=batch, N=features, L=seq_len
+       + tokens: {"market_session": int64, "event_type": int64, ...}
 
-1. **Input encoding** — each of the N feature time series (length L) is projected to a 768-dim vector by a shared linear layer (`wte`), producing one token per feature.
-2. **BERT encoder with PEFT** — semantic tokens (market session, event type, event impact) are prepended to the feature token sequence and passed through the first `n_layer` layers of `bert-base-uncased`. Core attention (Q/K/V) and FFN weights are **frozen**; only LayerNorm, positional embeddings, `wte`, semantic embeddings, and the forecast head are trained.
-3. **Forecast head** — hidden states of the semantic tokens and the last feature token are concatenated and projected to `pred_len` scalar forecasts. **RevIN** (Reversible Instance Normalisation) is applied before encoding and inverted after decoding.
+┌────────────────────────────────────────────────┐
+│  1. RevIN  (instance normalisation per series) │
+├────────────────────────────────────────────────┤
+│  2. Input encoding                             │
+│     shared Linear: (L,) → 768-dim token        │
+│     → N feature tokens + K semantic tokens     │
+├────────────────────────────────────────────────┤
+│  3. BERT encoder (first n_layer layers)        │
+│     ✗ Frozen: Q/K/V, FFN dense weights        │
+│     ✓ Trained: LayerNorm, pos. embed., wte,   │
+│                semantic embed., forecast head  │
+├────────────────────────────────────────────────┤
+│  4. Token selection                            │
+│     [semantic token outputs] + [last feat tok] │
+│     → concatenate → Linear → (B, 1, pred_len) │
+├────────────────────────────────────────────────┤
+│  5. RevIN⁻¹  (denormalise)                    │
+└────────────────────────────────────────────────┘
+Output: (B, 1, pred_len)
+```
 
-Note: BERT uses full bidirectional attention (no causal masking), as in the original Vola-BERT design.
+**Semantic token vocabulary**:
 
-**Hyperparameters**:
-- `n_layer`: Number of BERT encoder layers to use (default: 4; sweep over {2, 4, 6})
-- `revin`: Enable Reversible Instance Normalisation (default: `True`)
-- `head_drop_rate`: Dropout before the forecast head (default: 0.2)
-- `semantic_tokens`: Dict mapping token name → vocabulary size (e.g. `{"market_session": 4, "event_type": 5, "event_impact": 3}`); pass `{}` to disable
+| Token | Values | Description |
+|-------|--------|-------------|
+| market_session | 4 | overnight / pre-market / regular / after-hours |
+| event_type | 5 | none / CPI / PPI / NFP / FOMC |
+| event_impact | 3 | none / low / high |
+
+**Trainable parameter count** (n_layer=4): ~2.5M out of ~110M total BERT parameters.
 
 ### LSTM Baseline
 
-**Input**: Numerical features only, `(batch_size, num_series, seq_len)`
-
-**Architecture**:
-1. Input permuted from `(B, N, L)` to `(B, L, N)` for LSTM convention
-2. Unidirectional stacked LSTM layers with dropout between layers
-3. Last time-step hidden state taken, dropout applied
-4. Single linear layer → `(batch_size, 1, pred_len)` predictions
-
-**Hyperparameters**:
-- `hidden_size`: LSTM hidden dimension (default: 64)
-- `num_layers`: Stacked LSTM layers (default: 2)
-- `dropout`: Dropout between LSTM layers and before output (default: 0.2–0.4)
-
-## Evaluation
-
-### Metrics
-
-The trainer computes per epoch:
-- **MAE**: Mean absolute error (primary training loss)
-- **MSE**: Mean squared error (used for early stopping)
-
-After training, both scripts additionally compute:
-- **rMAE**: `model_MAE / naive_MAE` — ratio relative to the naive persistence baseline
-- **rMSE**: `model_MSE / naive_MSE` — ratio relative to the naive persistence baseline
-
-Values below 1.0 indicate the model outperforms the naive baseline. rMAE and rMSE are the primary evaluation metrics for comparing EquityBERT against the LSTM and naive baselines, consistent with the Vola-BERT paper methodology.
-
-### Viewing Results
-
-After training, checkpoints and logs are saved to:
-
 ```
-runs/
-├── v1/
-│   ├── BERT_RAW_24to5_full/
-│   │   └── checkpoints/
-│   │       ├── model.pth                    # Best model weights (saved by EarlyStopping)
-│   │       └── loss_BERT_RAW_24to5_full.png # MAE and MSE training curves
-│   └── run_version_1_equity_bert_sp500_results.txt   # Metrics summary (MAE, MSE, rMAE, rMSE)
-├── lstm_baseline_YYYY-MM-DD/
-│   ├── best_model_24to5.pth                 # Best LSTM checkpoint
-│   ├── lstm_results.txt                     # rMAE / rMSE summary
-│   └── lstm_training_curves.png             # Loss curves across all horizons
+Input: (B, N, L)
+
+Permute → (B, L, N)
+→ LSTM (hidden=64, layers=2, dropout=0.2–0.4)
+→ Last hidden state h_T: (B, 64)
+→ Dropout
+→ Linear: 64 → pred_len
+→ Reshape → (B, 1, pred_len)
+
+Output: (B, 1, pred_len)
 ```
 
-Load and evaluate an EquityBERT checkpoint:
+---
+
+## Feature Engineering
+
+### Dataset_SP500_1H Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `data_path` | str | — | Path to `ES_1h.parquet` |
+| `events_df` | DataFrame | None | Macro event calendar |
+| `flag` | str | `'train'` | `'train'`, `'val'`, or `'test'` |
+| `size` | tuple | `(48, 12)` | `(seq_len, pred_len)` |
+| `use_technical` | bool | True | Bollinger Bands, RSI, EMA, momentum |
+| `use_events` | bool | False | Event proximity features |
+| `use_event_type` | bool | False | Event type semantic token |
+| `use_event_impact` | bool | False | Event impact semantic token |
+| `use_interday` | bool | True | Lagged volatility (1h–24h) |
+| `use_explainable` | bool | True | Return semantic token dict |
+| `mode` | str | `'24h'` | `'24h'` (all hours) or `'trading'` (09:00–16:00 ET) |
+| `fine_tuning_pct` | float | None | Fraction of training data to use (scarce-data experiments) |
+
+### Technical Indicators (window T=20 bars)
+
+```python
+r_t         = ln(High_t / Low_t)           # log-range volatility (target)
+log_ret     = ln(Close_t / Close_{t-1})    # log return
+
+middle_band = SMA(log_ret, 20)
+upper_band  = middle_band + 2 × STD(log_ret, 20)   # Bollinger upper
+lower_band  = middle_band − 2 × STD(log_ret, 20)   # Bollinger lower
+
+momentum    = log_ret_t − log_ret_{t-20}
+acceleration= momentum_t − momentum_{t-20}
+
+ema         = EMA(log_ret, span=20)
+rsi         = Wilder_RSI(log_ret, period=14)
+```
+
+### Lagged Volatility (Interday Features)
+
+Captures volatility clustering across intraday and overnight horizons:
+
+| Feature | Lag |
+|---------|-----|
+| `prev_r_1h` | r[t−1] |
+| `prev_r_2h` | r[t−2] |
+| `prev_r_4h` | r[t−4] |
+| `prev_r_8h` | r[t−8] |
+| `prev_r_24h` | r[t−24] |
+
+### Market Session Tokens
+
+| Session | Hours (ET) | Token ID |
+|---------|-----------|----------|
+| overnight | 20:00–03:59 (+ Sun) | 0 |
+| pre_market | 04:00–09:29 | 1 |
+| regular | 09:30–15:59 | 2 |
+| after_hours | 16:00–19:59 | 3 |
+
+### Macro Event Tokens
+
+Event proximity features (when `use_events=True`):
+- `hours_to_event` — hours until next scheduled macro release (clipped at 999)
+- `hours_since_event` — hours since last release (clipped at 48)
+- `is_event_window` — binary flag within ±2 h of an event
+
+Event type token maps to: `{none: 0, CPI: 1, PPI: 2, NFP: 3, FOMC: 4}`
+
+---
+
+## Loading a Saved Checkpoint
 
 ```python
 import torch
@@ -237,112 +500,70 @@ from src.model_bert import EquityBERT
 from src.mydataset import SEMANTIC_TOKEN_VOCAB
 
 model = EquityBERT(
-    num_series=...,
+    num_series=14,        # number of input features (excluding target r)
     input_len=24,
     pred_len=5,
     n_layer=4,
     revin=True,
-    semantic_tokens=SEMANTIC_TOKEN_VOCAB,  # or {} to disable
+    semantic_tokens={"market_session": SEMANTIC_TOKEN_VOCAB["market_session"]},
 )
-model.load_state_dict(torch.load('runs/v1/BERT_RAW_24to5_full/checkpoints/model.pth'))
+
+state = torch.load("runs/equitybert/v27/No Events_24to5_full/checkpoints/checkpoint.pth",
+                   map_location="cpu")
+# checkpoint.pth is a raw state_dict; model.pth is also a raw state_dict
+model.load_state_dict(state)
 model.eval()
 
-# Make predictions — x: (B, N, L), tokens: dict of scalar int64 tensors
+# x: (B, N, L)  tokens: dict of int64 tensors
 with torch.no_grad():
-    predictions = model((x, tokens))  # (B, 1, pred_len)
+    predictions = model((x, tokens))   # → (B, 1, pred_len)
 ```
-
-## Feature Engineering
-
-### Technical Indicators (T=20 hourly bars)
-
-```python
-# Bollinger Bands
-middle_band = SMA(log_return, 20)
-upper_band  = middle_band + 2 * STD(log_return, 20)
-lower_band  = middle_band - 2 * STD(log_return, 20)
-
-# Momentum & Acceleration
-momentum     = log_return[t] - log_return[t-20]
-acceleration = momentum[t] - momentum[t-20]
-
-# EMA & RSI
-ema = EMA(log_return, span=20)
-rsi = Wilder_RSI(log_return, period=14)
-```
-
-### Market Sessions
-
-| Session     | Hours (ET) | Description            |
-|------------|-----------|------------------------|
-| overnight  | 20:00-04:00, Sunday | Thin futures market    |
-| pre_market | 04:00-09:30        | Institutional orders   |
-| regular    | 09:30-16:00        | NYSE core hours        |
-| after_hours| 16:00-20:00        | Post-close activity    |
-
-### Lagged Volatility
-
-Captures clustering and intraday periodicity:
-
-```python
-prev_r-1h  = r[t-1]
-prev_r-2h  = r[t-2]
-prev_r-4h  = r[t-4]
-prev_r-8h  = r[t-8]
-prev_r-24h = r[t-24]
-```
-
-## Troubleshooting
-
-### Issue: "No training data available for scaling"
-
-**Cause**: `fine_tuning_pct` is too small or data split is misaligned.
-
-**Solution**:
-```python
-# Reduce fine_tuning_pct or check data path
-train_ds = Dataset_SP500_1H(..., fine_tuning_pct=0.5)
-```
-
-### Issue: CUDA out of memory
-
-**Solution**: Reduce batch size or sequence length:
-```python
-batch_size = 16  # Down from 32
-seq_len = 24     # Down from 48
-```
-
-### Issue: NaN losses during training
-
-**Cause**: Learning rate too high or unstable gradients.
-
-**Solution**:
-```python
-learning_rate = 1e-4  # Reduce
-# Enable gradient clipping in trainer
-torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-```
-
-## Citation
-
-
-@article{ES_Futures,
-  title={EquityBERT: Transformer-based Volatility Forecasting for S&P 500 Futures},
-  author={Berker Basergun},
-  year={2026}
-}
-```
-
-## License
-
-See LICENSE file for details.
-
-## Contact
-
-For questions or issues, please open an issue on GitHub or contact the maintainers.
 
 ---
 
-**Last Updated**: April 2026  
-**Python Version**: 3.8+  
-**PyTorch Version**: 1.9+
+## Metrics Reference
+
+| Metric | Formula | Interpretation |
+|--------|---------|---------------|
+| MAE | mean\|ŷ − y\| | Absolute forecast error (primary) |
+| MSE | mean(ŷ − y)² | Penalises large errors more |
+| rMAE | MAE_model / MAE_naive | <1.0 beats naive persistence |
+| rMSE | MSE_model / MSE_naive | <1.0 beats naive persistence |
+| DM stat | d̄ / √(LRV/T) | >0 means EquityBERT wins on loss |
+
+**Naive baseline**: last observed `r` value in the input window repeated for all forecast steps.
+
+---
+
+## Troubleshooting
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| `No training data available for scaling` | `fine_tuning_pct` too small or path error | Check `data_path`; raise `fine_tuning_pct` |
+| CUDA out of memory | Batch or sequence too large | Reduce `batch_size` (try 16) or `seq_len` |
+| NaN losses | Learning rate too high | Set `lr=1e-4`; gradient clip added in Trainer |
+| `Checkpoint not found` | Wrong run version path | Check `EQUITYBERT_DIR` in `evaluate_inverse.py` / `compare_significance.py` |
+| MPS error in SHAP | GradientExplainer not fully MPS-compatible | `evaluation/evaluate_shap.py` forces CPU for SHAP computation |
+
+---
+
+## Citation
+
+```bibtex
+@mastersthesis{Basergun2026EquityBERT,
+  title  = {EquityBERT: Transformer-based Volatility Forecasting for S\&P 500 Futures},
+  author = {Basergun, Berker},
+  year   = {2026}
+}
+
+@inproceedings{Nguyen2025VolaBERT,
+  title     = {Repurposing Language Models for FX Volatility Forecasting},
+  author    = {Nguyen et al.},
+  booktitle = {ICAIF},
+  year      = {2025}
+}
+```
+
+---
+
+**Last Updated**: May 2026 · **Python**: 3.10+ · **PyTorch**: 2.0+
