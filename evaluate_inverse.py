@@ -9,9 +9,6 @@ Matches the architecture and data loading in:
   - model_equitybert.py  (EquityBERT class)
   - src/mydataset.py     (Dataset_SP500_1H)
 
-Usage:
-    python evaluate_inverse.py
-
 Outputs:
     - equitybert_results_original_scale.txt
     - equitybert_results_original_scale.csv
