@@ -152,6 +152,13 @@ vola-bert/
 │       ├── significance_results.txt
 │       └── significance_results.csv
 │
+├── eda_rt.py                      # Exploratory Data Analysis script
+├── eda_figures/                   # Generated EDA figures (PNG + PDF)
+│   ├── eda_timeseries.png         # Full 7-year r_t time series
+│   ├── eda_histogram.png          # Distribution histogram + KDE
+│   ├── eda_stats_table.png        # Summary statistics table
+│   ├── eda_stats_table.csv        # Machine-readable summary stats
+│   └── eda_intraday.png           # Intraday seasonality by hour-of-day
 ├── equitybert_results_original_scale.txt  # EquityBERT inverse-scale eval
 ├── equitybert_results_original_scale.csv
 ├── req.txt                        # Python dependencies
@@ -238,6 +245,49 @@ python src/macro_event_builder.py         # → data/NEW_macro_events.csv
 | event_type | CPI, PPI, NFP, FOMC |
 
 The calendar covers 2019-01-01 → 2026-03-31 with four event types at their standard release times (BLS releases at 08:30 ET; FOMC statements at 14:00 ET).
+
+---
+
+## Exploratory Data Analysis
+
+```bash
+python eda_rt.py
+```
+
+Produces four publication-ready figures (PNG at 300 dpi + PDF) in `eda_figures/`:
+
+| Figure | File | Description |
+|--------|------|-------------|
+| Time series | `eda_timeseries.png` | Hourly r_t over the full 7-year period with daily mean overlay, 30-day rolling std, and major event annotations (COVID, Fed hike cycle, SVB, Aug 2024 unwind). Train / Val / Test boundaries shown. |
+| Histogram | `eda_histogram.png` | Density histogram + KDE with Normal reference curve. Right-skew and excess kurtosis annotated. |
+| Stats table | `eda_stats_table.png` | Summary statistics table (also saved as `eda_stats_table.csv`). |
+| Intraday seasonality | `eda_intraday.png` | Mean and median r_t by hour-of-day (ET), session-coloured, with NYSE open / close markers. |
+
+### Summary Statistics — r_t = ln(H_t / L_t), ES Futures 1 h
+
+| Statistic | Value |
+|-----------|-------|
+| Observations | 42,742 |
+| Date range | 2019-01-01 → 2026-03-31 |
+| Mean | 0.002846 |
+| Median | 0.001981 |
+| Std dev | 0.003036 |
+| Min | 0.000098 |
+| Max | 0.083833 |
+| 5th percentile | 0.000595 |
+| 95th percentile | 0.007756 |
+| Skewness | +5.495 |
+| Excess kurtosis | +66.745 |
+| Autocorrelation lag 1 | 0.698 |
+| Autocorrelation lag 5 | 0.515 |
+| Autocorrelation lag 24 | 0.580 |
+
+**Key observations:**
+
+- **Right-skewed, fat-tailed**: skewness +5.5 and excess kurtosis +67 confirm the distribution is far from Gaussian; the maximum bar (0.084, during the COVID crash) is ~30× the mean.
+- **Strong autocorrelation**: ACF(1) = 0.70 and ACF(24) = 0.58 indicate that volatility one day ago is nearly as predictive as the previous hour — directly motivating the 48-hour lookback window used in EquityBERT.
+- **Intraday U-shape**: r_t peaks at the NYSE open (09:30 ET), remains elevated into the early afternoon, and drops to overnight lows after 20:00 ET. This regime structure is explicitly captured by the market session semantic token.
+- **Volatility clustering**: the 30-day rolling standard deviation panel shows sustained elevated regimes around COVID (Mar 2020), the Fed hike cycle (2022), and the Aug 2024 carry-unwind, consistent with GARCH-type clustering.
 
 ---
 
