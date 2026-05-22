@@ -26,16 +26,16 @@ Diebold-Mariano test with Newey-West long-run variance (lags = pred\_len − 1).
 
 ### EquityBERT vs Naive Persistence Baseline (original scale)
 
-| Horizon | Variant | Naive MAE | Model MAE | rMAE | rMSE | Improvement |
-|---------|---------|-----------|-----------|------|------|-------------|
-| 24→5 h | No Events | 0.001518 | 0.001238 | 0.815 | 0.794 | −18.5% |
-| 24→5 h | Event Type Only | 0.001518 | 0.001227 | 0.808 | 0.785 | −19.2% |
-| 24→5 h | Event Timing Only | 0.001518 | 0.001227 | 0.808 | 0.784 | −19.2% |
-| 50→10 h | No Events | 0.001762 | 0.001344 | 0.763 | 0.661 | −23.7% |
-| 50→10 h | Event Type Only | 0.001762 | 0.001319 | 0.749 | 0.657 | **−25.2%** |
-| 50→10 h | Event Timing Only | 0.001762 | 0.001368 | 0.776 | 0.668 | −22.4% |
+| Horizon | Variant | Naive MAE | Model MAE | rMAE | rMSE | vs Naive | ∆MAE vs No Events |
+|---------|---------|-----------|-----------|------|------|----------|-------------------|
+| 24→5 h | No Events | 0.001518 | 0.001238 | 0.815 | 0.794 | −18.5% | — |
+| 24→5 h | Event Type Only | 0.001518 | 0.001227 | 0.808 | 0.785 | −19.2% | −0.000011 (−0.9%) |
+| 24→5 h | Event Timing Only | 0.001518 | 0.001227 | 0.808 | 0.784 | −19.2% | −0.000011 (−0.9%) |
+| 50→10 h | No Events | 0.001762 | 0.001344 | 0.763 | 0.661 | −23.7% | — |
+| 50→10 h | Event Type Only | 0.001762 | 0.001319 | 0.749 | 0.657 | **−25.2%** | −0.000025 (−1.9%) |
+| 50→10 h | Event Timing Only | 0.001762 | 0.001368 | 0.776 | 0.668 | −22.4% | +0.000024 (+1.8%) |
 
-rMAE < 1.0 means the model beats the naive last-value persistence baseline. rMAE and rMSE follow the Vola-BERT paper (Nguyen et al., 2025) evaluation protocol.
+rMAE < 1.0 means the model beats the naive last-value persistence baseline. rMAE and rMSE follow the Vola-BERT paper (Nguyen et al., 2025) evaluation protocol. ∆MAE vs No Events shows the marginal contribution of each event token variant relative to the session-token-only baseline.
 
 ### Statistical Significance Summary
 
@@ -158,7 +158,9 @@ vola-bert/
 │   ├── eda_histogram.png          # Distribution histogram + KDE
 │   ├── eda_stats_table.png        # Summary statistics table
 │   ├── eda_stats_table.csv        # Machine-readable summary stats
-│   └── eda_intraday.png           # Intraday seasonality by hour-of-day
+│   ├── eda_intraday.png           # Intraday seasonality by hour-of-day
+│   ├── eda_acf_pacf.png           # ACF / PACF up to lag 48 h
+│   └── eda_event_window.png       # Volatility response ±12 h around macro releases
 ├── equitybert_results_original_scale.txt  # EquityBERT inverse-scale eval
 ├── equitybert_results_original_scale.csv
 ├── req.txt                        # Python dependencies
@@ -254,14 +256,16 @@ The calendar covers 2019-01-01 → 2026-03-31 with four event types at their sta
 python eda_rt.py
 ```
 
-Produces four publication-ready figures (PNG at 300 dpi + PDF) in `eda_figures/`:
+Produces six publication-ready figures (PNG at 300 dpi + PDF) in `eda_figures/`:
 
 | Figure | File | Description |
 |--------|------|-------------|
 | Time series | `eda_timeseries.png` | Hourly r_t over the full 7-year period with daily mean overlay, 30-day rolling std, and major event annotations (COVID, Fed hike cycle, SVB, Aug 2024 unwind). Train / Val / Test boundaries shown. |
-| Histogram | `eda_histogram.png` | Density histogram + KDE with Normal reference curve. Right-skew and excess kurtosis annotated. |
+| Histogram | `eda_histogram.png` | Density histogram + KDE with Normal reference curve. Right-skew (+5.5) and excess kurtosis (+67) annotated. |
 | Stats table | `eda_stats_table.png` | Summary statistics table (also saved as `eda_stats_table.csv`). |
 | Intraday seasonality | `eda_intraday.png` | Mean and median r_t by hour-of-day (ET), session-coloured, with NYSE open / close markers. |
+| ACF / PACF | `eda_acf_pacf.png` | Autocorrelation and partial ACF up to lag 48 h. Significant lags highlighted; lags 1, 5, 24 marked. Directly motivates the 48 h lookback window. |
+| Event-window | `eda_event_window.png` | Mean r_t ±12 h around each macro release type (CPI, PPI, NFP, FOMC), with ±1 SE ribbon and unconditional mean reference. Empirically motivates the event semantic tokens. |
 
 ### Summary Statistics — r_t = ln(H_t / L_t), ES Futures 1 h
 
@@ -285,7 +289,8 @@ Produces four publication-ready figures (PNG at 300 dpi + PDF) in `eda_figures/`
 **Key observations:**
 
 - **Right-skewed, fat-tailed**: skewness +5.5 and excess kurtosis +67 confirm the distribution is far from Gaussian; the maximum bar (0.084, during the COVID crash) is ~30× the mean.
-- **Strong autocorrelation**: ACF(1) = 0.70 and ACF(24) = 0.58 indicate that volatility one day ago is nearly as predictive as the previous hour — directly motivating the 48-hour lookback window used in EquityBERT.
+- **Persistent autocorrelation with a 24 h seasonal cycle**: the ACF decays slowly (ACF(1)=0.70, ACF(24)=0.58) and shows a clear trough–peak oscillation at multiples of 24 lags, reflecting the daily open-close volatility cycle. The PACF cuts off sharply after lag 2–3, confirming that the long memory is driven by a seasonal AR structure rather than long-range dependence. This directly motivates the 48 h lookback window.
+- **Macro releases cause sharp volatility spikes**: all four event types (CPI, PPI, NFP, FOMC) show a pronounced spike at lag 0 (release hour), with FOMC producing the largest response (~3–4× the unconditional mean) and CPI/NFP showing elevated volatility persisting for 2–3 h post-release. This empirically validates the inclusion of event semantic tokens in EquityBERT.
 - **Intraday U-shape**: r_t peaks at the NYSE open (09:30 ET), remains elevated into the early afternoon, and drops to overnight lows after 20:00 ET. This regime structure is explicitly captured by the market session semantic token.
 - **Volatility clustering**: the 30-day rolling standard deviation panel shows sustained elevated regimes around COVID (Mar 2020), the Fed hike cycle (2022), and the Aug 2024 carry-unwind, consistent with GARCH-type clustering.
 
@@ -361,6 +366,23 @@ Both models use the same 70 / 15 / 15 weekly split on the full dataset:
 
 ---
 
+## Reproducibility
+
+| Item | Value |
+|------|-------|
+| Random seed | PyTorch default (no manual seed set — results may vary by ±0.0001 MAE across runs) |
+| Hardware | Apple M-series (MPS backend); SHAP evaluation forced to CPU |
+| EquityBERT training time | ~25–40 min per variant per horizon (M-series, batch=32) |
+| LSTM training time | ~5–8 min per horizon |
+| SHAP evaluation time | ~15–20 min per horizon (CPU, 500 background samples) |
+| Python | 3.10+ |
+| PyTorch | ≥2.0 |
+| Transformers | bert-base-uncased weights from HuggingFace Hub |
+
+To reproduce the reported results exactly, use the checkpoints in `runs/equityBERT/v27/` and `runs/lstm_baseline/v2/` together with `evaluate_inverse.py` and `compare_significance.py`. Retraining from scratch will produce statistically equivalent but not bit-identical numbers due to the absence of a fixed global seed.
+
+---
+
 ## Evaluation Pipeline
 
 ### 1. EquityBERT — Original-Scale Metrics
@@ -390,10 +412,29 @@ Produces inside `runs/lstm_baseline/v{N}/`:
 python evaluation/evaluate_shap.py
 ```
 
-Produces inside the LSTM run directory:
+Produces inside `runs/lstm_baseline/v{N}/`:
 - `shap_bar_{tag}.png` — ranked mean |SHAP| per feature
 - `shap_heatmap_{tag}.png` — feature × time-step importance heatmap
 - `shap_summary_{tag}.png` — beeswarm coloured by feature value
+
+**Results — feature ranking by mean |SHAP value|** (GradientExplainer, 500 test samples):
+
+| Rank | Feature | 24→5 h | 50→10 h | Interpretation |
+|------|---------|--------|---------|----------------|
+| 1 | `prev_r_8h` | 0.00632 | 0.00300 | Previous US session volatility — dominant signal at both horizons |
+| 2 | `log_volume` | 0.00601 | 0.00283 | Volume–volatility relationship; second-most important across horizons |
+| 3 | `prev_r_1h` | 0.00390 | 0.00088 | Very recent memory — critical short-term, decays at longer horizon |
+| 4 | `rsi` | 0.00224 | 0.00080 | Momentum state; more useful at 24→5 where regime is fresh |
+| 3† | `prev_r_24h` | 0.00202 | 0.00180 | Daily cycle — rises to #3 at 50→10 (full day lookback matters more) |
+| 4† | `momentum` | 0.00099 | 0.00173 | Price-change acceleration; gains importance at longer horizon |
+
+†Rank at 50→10 horizon.
+
+**Key findings:**
+- `prev_r_8h` and `log_volume` are the top-2 features at both horizons, together accounting for ~60% of total SHAP weight at 24→5 and ~50% at 50→10.
+- At the **short horizon (24→5)**, very recent lags (`prev_r_1h`, RSI) dominate after the top-2 — the model is primarily an intraday mean-reversion/persistence signal.
+- At the **long horizon (50→10)**, `prev_r_24h` and `momentum` rise significantly — the model begins to exploit the daily volatility cycle and directional momentum.
+- Technical indicators (Bollinger bands, EMA) contribute modestly at both horizons, confirming their secondary role relative to the raw lagged volatility features.
 
 ### 4. Statistical Significance Testing
 
@@ -597,6 +638,20 @@ with torch.no_grad():
 
 ---
 
+## Limitations
+
+| Limitation | Detail |
+|------------|--------|
+| **MSE not improved** | EquityBERT reduces MAE significantly (−25% vs LSTM) but DM tests on MSE are uniformly n.s. Both models produce similarly-sized errors on extreme bars (COVID, Aug 2024). Tail-event forecasting remains an open problem. |
+| **BERT frozen weights** | Q/K/V and FFN weights are fixed at bert-base-uncased pre-trained values. Only LayerNorm, positional embeddings, and the forecast head are fine-tuned. The attention structure was not pre-trained on financial sequences and may not be optimal for this domain. |
+| **Single instrument** | All experiments use ES.FUT (front-month E-mini S&P 500). Transferability to other equity indices, commodities, or FX has not been tested. |
+| **Event impact not modelled** | The macro calendar includes release type (CPI/PPI/NFP/FOMC) but not the surprise component (actual minus consensus). Surprise magnitude is the primary driver of event-hour volatility spikes, and is not captured by timing tokens alone. |
+| **No exogenous macro features** | VIX, yield-curve slope, and other macro regime indicators are excluded. These could improve performance during sustained regime shifts (e.g., 2022 rate cycle). |
+| **Fixed lookback** | The 48 h / 50 h lookback windows are fixed hyperparameters. An adaptive or attention-based window selection was not explored. |
+| **No global seed** | Weights are randomly initialised without a fixed seed. Reported metrics are from a single training run; ensemble averaging across seeds was not performed. |
+
+---
+
 ## Citation
 
 ```bibtex
@@ -616,4 +671,4 @@ with torch.no_grad():
 
 ---
 
-**Last Updated**: May 2026 · **Python**: 3.10+ · **PyTorch**: 2.0+
+**Last Updated**: May 2026 · **Python**: 3.10+ · **PyTorch**: 2.0+ · **EDA figures**: 6

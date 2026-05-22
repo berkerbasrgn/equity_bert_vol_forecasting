@@ -351,4 +351,116 @@ fig.savefig(f"{OUT_DIR}/eda_intraday.pdf", bbox_inches="tight")
 plt.close(fig)
 print(f"  → {OUT_DIR}/eda_intraday.png")
 
+
+# ---------------------------------------------------------------------------
+# 5. ACF / PACF
+# ---------------------------------------------------------------------------
+print("Plotting ACF / PACF ...")
+
+from statsmodels.tsa.stattools import pacf as pacf_fn
+
+MAX_LAG = 48
+CI_BOUND = 1.96 / np.sqrt(len(r))
+
+acf_full  = acf(r,  nlags=MAX_LAG, fft=True)
+pacf_full = pacf_fn(r, nlags=MAX_LAG, method="ywm")
+
+fig, (ax_acf, ax_pacf) = plt.subplots(1, 2, figsize=(13, 4.2))
+
+for ax, vals, title in [
+    (ax_acf,  acf_full[1:],  "Autocorrelation Function (ACF)"),
+    (ax_pacf, pacf_full[1:], "Partial ACF (PACF)"),
+]:
+    lags = np.arange(1, MAX_LAG + 1)
+    ax.bar(lags, vals, color=np.where(np.abs(vals) > CI_BOUND, "#1B4F8A", "#9EB9D4"),
+           width=0.7, zorder=2)
+    ax.axhline(0,          color="black", linewidth=0.6)
+    ax.axhline( CI_BOUND,  color="#C0392B", linewidth=0.9, linestyle="--",
+                label="95% CI")
+    ax.axhline(-CI_BOUND,  color="#C0392B", linewidth=0.9, linestyle="--")
+
+    for lag_mark, col in [(1, "#55A868"), (5, "#DD8452"), (24, "#9B59B6")]:
+        v = vals[lag_mark - 1]
+        ax.axvline(lag_mark, color=col, linewidth=0.9, linestyle=":", alpha=0.8,
+                   label=f"Lag {lag_mark} ({v:+.3f})")
+
+    ax.set_xlim(0, MAX_LAG + 1)
+    ax.set_xlabel("Lag (hours)")
+    ax.set_ylabel("Correlation")
+    ax.set_title(title, fontweight="bold")
+    ax.legend(fontsize=8, framealpha=0.85)
+
+fig.suptitle("Autocorrelation Structure of $r_t$  ---  ES Futures 1 h  (lags 1-48)",
+             fontweight="bold", fontsize=11)
+fig.tight_layout()
+fig.savefig(f"{OUT_DIR}/eda_acf_pacf.png", bbox_inches="tight")
+fig.savefig(f"{OUT_DIR}/eda_acf_pacf.pdf", bbox_inches="tight")
+plt.close(fig)
+print(f"  -> {OUT_DIR}/eda_acf_pacf.png")
+
+# ---------------------------------------------------------------------------
+# 6. Event-window volatility response
+# ---------------------------------------------------------------------------
+print("Plotting event-window analysis ...")
+
+EVENTS_PATH = "data/NEW_macro_events.csv"
+EVENT_COLORS = {"CPI": "#DD8452", "PPI": "#4C72B0",
+                "NFP": "#55A868", "FOMC": "#C44E52"}
+WINDOW = 12  # hours either side of each release
+
+events_raw = pd.read_csv(EVENTS_PATH)
+events_raw["datetime"] = (pd.to_datetime(events_raw["datetime"], utc=True)
+                          .dt.tz_convert("America/New_York"))
+
+df_rt = df.set_index("Datetime")["r_t"]
+
+rows_ev = []
+for _, ev in events_raw.iterrows():
+    et, etype = ev["datetime"], ev["event_type"]
+    pos = df_rt.index.searchsorted(et)
+    for lag in range(-WINDOW, WINDOW + 1):
+        idx = pos + lag
+        if 0 <= idx < len(df_rt):
+            rows_ev.append({"event_type": etype, "lag_h": lag,
+                            "r_t": df_rt.iloc[idx]})
+
+ev_df = pd.DataFrame(rows_ev)
+ev_agg = (ev_df.groupby(["event_type", "lag_h"])["r_t"]
+          .agg(mean="mean", se=lambda x: x.std(ddof=1) / np.sqrt(len(x)))
+          .reset_index())
+
+mu_all = df["r_t"].mean()
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 7), sharey=True)
+axes = axes.flatten()
+
+for ax, etype in zip(axes, ["CPI", "PPI", "NFP", "FOMC"]):
+    sub = ev_agg[ev_agg["event_type"] == etype].sort_values("lag_h")
+    col = EVENT_COLORS[etype]
+    n_ev = int((ev_df["event_type"] == etype).sum() / (2 * WINDOW + 1))
+
+    ax.fill_between(sub["lag_h"], sub["mean"] - sub["se"],
+                    sub["mean"] + sub["se"], alpha=0.25, color=col)
+    ax.plot(sub["lag_h"], sub["mean"], color=col, linewidth=1.8,
+            label=f"{etype} (n={n_ev})")
+    ax.axhline(mu_all, color="grey", linewidth=0.9, linestyle="--",
+               label=f"Unconditional mean ({mu_all:.4f})")
+    ax.axvline(0, color="black", linewidth=1.0, linestyle="--", alpha=0.6)
+    yhi = sub["mean"].max() * 1.05
+    ax.text(0.3, yhi, "Release", fontsize=7.5, va="top", color="black")
+
+    ax.set_xlim(-WINDOW, WINDOW)
+    ax.set_xlabel("Hours relative to release")
+    ax.set_ylabel("Mean $r_t$")
+    ax.set_title(f"{etype} Release Window", fontweight="bold")
+    ax.legend(fontsize=8.5, framealpha=0.85)
+
+fig.suptitle("Volatility Response Around Macro Releases  (+-12 h)  ---  ES Futures 1 h",
+             fontweight="bold", fontsize=11)
+fig.tight_layout()
+fig.savefig(f"{OUT_DIR}/eda_event_window.png", bbox_inches="tight")
+fig.savefig(f"{OUT_DIR}/eda_event_window.pdf", bbox_inches="tight")
+plt.close(fig)
+print(f"  -> {OUT_DIR}/eda_event_window.png")
+
 print(f"\nAll EDA figures written to '{OUT_DIR}/'")
