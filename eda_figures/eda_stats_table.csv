@@ -1,0 +1,15 @@
+Statistic,Value
+Observations,"42,742"
+Date range,2019-01-01  →  2026-03-31
+Mean,0.002846
+Median,0.001981
+Std dev,0.003036
+Min,0.000098
+Max,0.083833
+5th percentile,0.000595
+95th percentile,0.007756
+Skewness,+5.4953
+Excess kurtosis,+66.7452
+Autocorrelation lag 1,0.6983
+Autocorrelation lag 5,0.5154
+Autocorrelation lag 24,0.5797
