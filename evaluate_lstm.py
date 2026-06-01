@@ -57,7 +57,7 @@ def find_run_folder(date_str=None):
     If date_str is provided, looks for lstm_baseline_YYYY-MM-DD.
     Otherwise, returns the latest (most recent) folder.
     """
-    pattern = os.path.join(BASE_RUN_DIR, "v2")
+    pattern = os.path.join(BASE_RUN_DIR, "v1")
     folders = sorted(glob.glob(pattern), reverse=True)
     
     if not folders:
